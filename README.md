@@ -1,6 +1,6 @@
 # Japanese-to-English Direct S2ST production corpus
 
-選別済みの日英対訳から、同一話者の合成音声ペアを本番規模で生成する独立リポジトリです。
+選別済みの日英対訳から、同一話者の合成音声ペアを本番規模で生成します。
 
 ```text
 日英対訳manifest
@@ -10,8 +10,6 @@
   → 再生成・shard manifest
   → release manifest
 ```
-
-GTX 1650向けテストコードはこのリポジトリに含みません。
 
 ## 必要環境
 
@@ -55,9 +53,3 @@ docker compose run --rm corpus `
 ```
 
 詳しい運用方法は `docs/production-runbook.md`、研究設計は `docs/corpus-design.md` を参照してください。
-
-## モデル不要テスト
-
-```powershell
-docker compose run --rm --entrypoint python3 corpus -m pytest -q
-```
