@@ -1,0 +1,51 @@
+run:
+  input_jsonl: /workspace/input/pairs.jsonl
+  output_dir: /workspace/output
+  num_shards: 128
+  max_pairs_per_shard: 2500
+  checkpoint_every: 10
+  minimum_free_gib: 80
+  minimum_cache_free_gib: 8
+  maximum_output_gib: 78
+  expected_hours_per_language: 300
+  retry_storage_fraction: 0.10
+  # Native Qwen WAV roughly doubles storage. The release corpus keeps only
+  # canonical 16 kHz PCM16 unless an explicit archival run enables this.
+  save_native: false
+  resume: true
+
+device:
+  require_cuda: true
+  minimum_vram_gib: 16
+  require_bf16: true
+  attention: sdpa
+
+tts:
+  model_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+  revision: f00cf133b78d3c2c35857faba3b1be9b98c4f971
+  device: cuda:0
+  dtype: bfloat16
+  speaker: Ono_Anna
+  instruct: ""
+  max_new_tokens: 2048
+  do_sample: true
+  subtalker_do_sample: true
+  remove_invalid_values: false
+  renormalize_logits: true
+  output_sample_rate: 16000
+  max_content_retries: 1
+
+asr:
+  model_id: openai/whisper-large-v3-turbo
+  revision: 60be3615a4d667e1258e8ad29130467587c489aa
+  dtype: float16
+  attention: sdpa
+  do_sample: false
+  num_beams: 1
+  condition_on_prev_tokens: false
+
+qc:
+  max_ja_cer: 0.10
+  max_en_wer: 0.10
+  min_duration_seconds: 0.7
+  max_duration_seconds: 30.0

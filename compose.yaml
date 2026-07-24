@@ -1,0 +1,24 @@
+name: direct-s2st-corpus
+
+services:
+  corpus:
+    image: direct-s2st-corpus:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    gpus: all
+    shm_size: "4gb"
+    environment:
+      HF_HOME: /cache/huggingface
+      HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      TOKENIZERS_PARALLELISM: "false"
+    volumes:
+      - ./.cache/huggingface:/cache/huggingface
+      - ./configs:/workspace/configs:ro
+      - ${CORPUS_INPUT_ROOT:-./data/input}:/workspace/input:ro
+      - ${CORPUS_OUTPUT_ROOT:-./data/production}:/workspace/output
+    command:
+      - --config
+      - /workspace/configs/production-qwen17b.yaml
+      - plan

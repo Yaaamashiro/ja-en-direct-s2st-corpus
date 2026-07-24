@@ -1,0 +1,4 @@
+{"pair_id":"jesc_train_000001","corpus":"jesc","split":"train","ja_text":"今日は仕事が早く終わりました。","en_text":"I finished work early today.","source_id":"000001","license_id":"CC-BY-SA-4.0"}
+{"pair_id":"jesc_train_000002","corpus":"jesc","split":"train","ja_text":"駅に着いたら電話してください。","en_text":"Please call me when you arrive at the station.","source_id":"000002","license_id":"CC-BY-SA-4.0"}
+{"pair_id":"kftt_train_000001","corpus":"kftt","split":"train","ja_text":"この庭園は江戸時代に造られたと伝えられています。","en_text":"It is said that this garden was built during the Edo period.","source_id":"000001","license_id":"CC-BY-SA-3.0"}
+{"pair_id":"kftt_train_000002","corpus":"kftt","split":"train","ja_text":"春になると多くの観光客が桜を見に訪れます。","en_text":"In spring, many tourists visit to see the cherry blossoms.","source_id":"000002","license_id":"CC-BY-SA-3.0"}
