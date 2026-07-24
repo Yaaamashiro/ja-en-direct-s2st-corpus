@@ -1,4 +1,4 @@
-# Direct S2ST production corpus
+# Japanese-to-English Direct S2ST production corpus
 
 選別済みの日英対訳から、同一話者の合成音声ペアを本番規模で生成する独立リポジトリです。
 

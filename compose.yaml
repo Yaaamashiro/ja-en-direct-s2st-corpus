@@ -1,8 +1,8 @@
-name: direct-s2st-corpus
+name: ja-en-direct-s2st-corpus
 
 services:
   corpus:
-    image: direct-s2st-corpus:latest
+    image: ja-en-direct-s2st-corpus:latest
     build:
       context: .
       dockerfile: Dockerfile

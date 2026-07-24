@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "direct-s2st-corpus"
+name = "ja-en-direct-s2st-corpus"
 version = "0.1.0"
-description = "Production Japanese-English synthetic speech-pair corpus pipeline"
+description = "Production Japanese-to-English synthetic speech-pair corpus pipeline"
 requires-python = ">=3.10"
 
 [project.scripts]
