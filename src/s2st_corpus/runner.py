@@ -19,7 +19,7 @@ from .audio import (
     resample_mono,
     sha256_file,
 )
-from .io import directory_size, ensure_disk_budget
+from .io import directory_size, ensure_reusable_budget
 from .normalization import (
     japanese_reading_normalize,
     minimal_normalize,
@@ -83,13 +83,13 @@ def plan(config: AppConfig) -> dict[str, Any]:
 def gpu_preflight(config: AppConfig) -> dict[str, Any]:
     import torch
 
-    ensure_disk_budget(
-        [config.run.output_dir],
-        minimum_free_gb=config.run.minimum_free_gib,
+    ensure_reusable_budget(
+        config.run.output_dir,
+        required_total_gib=config.run.minimum_free_gib,
     )
-    ensure_disk_budget(
-        [Path(os.environ.get("HF_HOME", config.run.output_dir / ".hf-cache"))],
-        minimum_free_gb=config.run.minimum_cache_free_gib,
+    ensure_reusable_budget(
+        Path(os.environ.get("HF_HOME", config.run.output_dir / ".hf-cache")),
+        required_total_gib=config.run.minimum_cache_free_gib,
     )
     if config.device.require_cuda and not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the production profile")
@@ -169,8 +169,8 @@ def _fatal_accelerator_error(error: BaseException) -> bool:
 
 def _new_record(pair: dict[str, Any]) -> dict[str, Any]:
     record = dict(pair)
-    record["ja_text_raw"] = pair["ja_text"]
-    record["en_text_raw"] = pair["en_text"]
+    record.setdefault("ja_text_raw", pair["ja_text"])
+    record.setdefault("en_text_raw", pair["en_text"])
     record["ja_tts_text"] = minimal_normalize(pair["ja_text"])
     record["en_tts_text"] = minimal_normalize(pair["en_text"])
     record["attempts"] = {"ja": [], "en": []}

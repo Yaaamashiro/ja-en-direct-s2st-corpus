@@ -16,9 +16,6 @@ services:
     volumes:
       - ./.cache/huggingface:/cache/huggingface
       - ./configs:/workspace/configs:ro
-      - ${CORPUS_INPUT_ROOT:-./data/input}:/workspace/input:ro
-      - ${CORPUS_OUTPUT_ROOT:-./data/production}:/workspace/output
+      - ${CORPUS_DATA_ROOT:-./data}:/workspace/data
     command:
-      - --config
-      - /workspace/configs/production-qwen17b.yaml
-      - plan
+      - build

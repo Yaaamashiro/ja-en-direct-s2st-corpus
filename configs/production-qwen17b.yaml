@@ -1,6 +1,6 @@
 run:
-  input_jsonl: /workspace/input/pairs.jsonl
-  output_dir: /workspace/output
+  input_jsonl: /workspace/data/input/pairs.jsonl
+  output_dir: /workspace/data/production
   num_shards: 128
   max_pairs_per_shard: 2500
   checkpoint_every: 10
@@ -13,6 +13,41 @@ run:
   # canonical 16 kHz PCM16 unless an explicit archival run enables this.
   save_native: false
   resume: true
+
+prepare:
+  sources_dir: /workspace/data/sources
+  # Archive extraction and SQLite selection run in the container-local
+  # filesystem. Only the final manifest/report are persisted to the host.
+  work_dir: /tmp/ja-en-direct-s2st-preparation
+  reports_dir: /workspace/data/reports/preparation
+  target_train_hours: 300
+  jesc_fraction: 0.70
+  selection_seed: 20260723
+  # Initial duration estimate. Recalibrate from the 2,000-pair pilot by
+  # creating a new data root and changing only these two fields.
+  ja_chars_per_second: 5.5
+  utterance_padding_seconds: 0.5
+  short_max_ja_chars: 24
+  medium_max_ja_chars: 64
+  short_time_fraction: 0.20
+  medium_time_fraction: 0.50
+  long_time_fraction: 0.30
+  include_dev: true
+  include_test: true
+
+sources:
+  jesc:
+    url: https://nlp.stanford.edu/projects/jesc/data/split.tar.gz
+    archive_name: jesc-split-2019-05-12.tar.gz
+    sha256: 9cc6f2b31225d84b204a1bc4599e5fbb158d5739ba4aa76eab30fea05ed8ccd5
+    version: "2019-05-12"
+    license_id: CC-BY-SA-4.0
+  kftt:
+    url: https://www.phontron.com/kftt/download/kftt-data-1.0.tar.gz
+    archive_name: kftt-data-1.0.tar.gz
+    sha256: fcfcaa670d6d59aa691b0e909c0d7c393852dd2fb1d6310fda9b3282dc6d1638
+    version: "1.0"
+    license_id: CC-BY-SA-3.0
 
 device:
   require_cuda: true

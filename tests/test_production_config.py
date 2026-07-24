@@ -21,3 +21,5 @@ def test_production_profile_is_pinned_and_storage_bounded() -> None:
     assert config.tts.speaker == "Ono_Anna"
     assert config.asr.model_id == "openai/whisper-large-v3-turbo"
     assert config.device.require_bf16 is True
+    assert config.sources["jesc"].version == "2019-05-12"
+    assert config.sources["kftt"].version == "1.0"
