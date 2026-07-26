@@ -49,6 +49,13 @@ sources:
     version: "1.0"
     license_id: CC-BY-SA-3.0
 
+smoke:
+  input_jsonl: /workspace/data/smoke/input/pairs.jsonl
+  output_dir: /workspace/data/smoke/production
+  pair_count: 5
+  minimum_free_gib: 1
+  maximum_output_gib: 1
+
 device:
   require_cuda: true
   minimum_vram_gib: 16

@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import load_config
 from .corpora import prepare_corpora
 from .runner import consolidate, plan, run_shard
+from .smoke import select_smoke_pairs, smoke_app_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser(
         "build",
         help="Run the complete resumable pipeline from downloads to release.",
+    )
+    commands.add_parser(
+        "smoke-test",
+        help="Run the production TTS and Whisper pipeline on five corpus pairs.",
     )
     commands.add_parser("plan", help="Validate the input manifest and estimate storage.")
     shard = commands.add_parser("run-shard", help="Synthesize and QC one stable shard.")
@@ -69,6 +74,32 @@ def main() -> None:
             "preparation": preparation,
             "plan": planning,
             "release": release,
+        }
+    elif args.command == "smoke-test":
+        preparation = prepare_corpora(config)
+        selected = select_smoke_pairs(
+            config.run.input_jsonl,
+            config.smoke.input_jsonl,
+            config.smoke.pair_count,
+        )
+        smoke_config = smoke_app_config(config)
+        planning = plan(smoke_config)
+        run_shard(smoke_config, 0)
+        release = consolidate(smoke_config)
+        result = {
+            "preparation": preparation,
+            "selection": {
+                "pairs": len(selected),
+                "pair_ids": [pair["pair_id"] for pair in selected],
+                "input_jsonl": str(config.smoke.input_jsonl),
+            },
+            "plan": planning,
+            "release": {
+                **release,
+                "all_pairs_accepted": (
+                    release["accepted_pairs"] == config.smoke.pair_count
+                ),
+            },
         }
     elif args.command == "plan":
         result = plan(config)

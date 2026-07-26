@@ -52,6 +52,15 @@ class CorpusSourceConfig:
 
 
 @dataclass(frozen=True)
+class SmokeConfig:
+    input_jsonl: Path
+    output_dir: Path
+    pair_count: int
+    minimum_free_gib: float
+    maximum_output_gib: float
+
+
+@dataclass(frozen=True)
 class DeviceConfig:
     require_cuda: bool
     minimum_vram_gib: float
@@ -100,6 +109,7 @@ class AppConfig:
     run: RunConfig
     prepare: PrepareConfig
     sources: dict[str, CorpusSourceConfig]
+    smoke: SmokeConfig
     device: DeviceConfig
     tts: TTSConfig
     asr: ASRConfig
@@ -129,6 +139,10 @@ def load_config(path: Path) -> AppConfig:
         name: CorpusSourceConfig(**_mapping(values, f"sources.{name}"))
         for name, values in source_values.items()
     }
+    smoke_values = _mapping(raw.get("smoke"), "smoke").copy()
+    for key in ("input_jsonl", "output_dir"):
+        smoke_values[key] = Path(smoke_values[key])
+    smoke = SmokeConfig(**smoke_values)
     device = DeviceConfig(**_mapping(raw.get("device"), "device"))
     tts = TTSConfig(**_mapping(raw.get("tts"), "tts"))
     asr = ASRConfig(**_mapping(raw.get("asr"), "asr"))
@@ -142,6 +156,14 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("run.checkpoint_every must be positive")
     if set(sources) != {"jesc", "kftt"}:
         raise ValueError("sources must contain exactly jesc and kftt")
+    if smoke.pair_count < 1:
+        raise ValueError("smoke.pair_count must be positive")
+    if smoke.minimum_free_gib < 1 or smoke.maximum_output_gib < 1:
+        raise ValueError("smoke disk limits must be positive")
+    if smoke.minimum_free_gib < smoke.maximum_output_gib:
+        raise ValueError(
+            "smoke.minimum_free_gib must cover smoke.maximum_output_gib"
+        )
     if prepare.target_train_hours <= 0:
         raise ValueError("prepare.target_train_hours must be positive")
     if not 0 < prepare.jesc_fraction < 1:
@@ -202,6 +224,7 @@ def load_config(path: Path) -> AppConfig:
         run=run,
         prepare=prepare,
         sources=sources,
+        smoke=smoke,
         device=device,
         tts=tts,
         asr=asr,

@@ -23,3 +23,5 @@ def test_production_profile_is_pinned_and_storage_bounded() -> None:
     assert config.device.require_bf16 is True
     assert config.sources["jesc"].version == "2019-05-12"
     assert config.sources["kftt"].version == "1.0"
+    assert config.smoke.pair_count == 5
+    assert config.smoke.output_dir != config.run.output_dir

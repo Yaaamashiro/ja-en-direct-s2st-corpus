@@ -237,7 +237,6 @@ ja_reading_override
 - seedは `SHA-256(pair_id + NUL + language + NUL + attempt)` の先頭8 byteを符号なし整数化し、63 bitに制限して決める
 - 発話ごとにPython、NumPy、PyTorch、全CUDA deviceのseedを設定する
 - canonical生成は `batch_size=1`、`workers_per_gpu=1` から開始する
-- 100文smoke testでbatch size 1と4の出力を比較し、音声hashとQC値が一致する場合だけ4へ変更できる
 - フル生成開始後にspeaker、設定、依存関係を変えない。変更時はcorpus major versionを上げる
 
 ## 11. 音声形式
@@ -473,9 +472,9 @@ scripts/
 - 公式コードcommitと実行環境lockを固定
 - 保存先、バックアップ、計算環境を確定
 
-### Gate 1: 100文 smoke test
+### Gate 1: 5文 production smoke test
 
-- JESC/KFTT、短/長、日英を含む
+- JESC 3文、KFTT 2文、short/medium/long、日英を含む
 - TTS入力正規化、QC用読み生成、TTS、再開、16 kHz化、ASR-QC、manifestまで通す
 
 ### Gate 2: 500文対 バイリンガル話者試験

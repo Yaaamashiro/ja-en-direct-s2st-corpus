@@ -11,6 +11,36 @@ docker compose run --build --rm corpus
 すべての段階は再実行可能であり、同じ設定とデータルートでは完成済みの
 manifest、音声、shardを再利用する。
 
+## 本番GPUの5文スモークテスト
+
+本番を開始する前に、実際のJESC/KFTTから選んだ5文対だけで、Qwen生成から
+Whisper品質検査、release manifest作成までを確認できる。
+
+```powershell
+docker compose run --build --rm corpus smoke-test
+```
+
+選択内訳はJESCのshort/medium/long各1文と、KFTTのmedium/long各1文である。
+日英とも文末が完結しているtrain文だけを候補にする。
+該当層が不足した場合だけ、同じtrain splitの決定論的な候補で補完する。
+本番manifestと公式アーカイブは共有するが、入力・音声・manifestの出力先は
+次の専用ディレクトリへ分離される。
+
+```text
+data/smoke/
+├── input/pairs.jsonl
+└── production/
+    ├── audio/16k/{ja,en}/shard-00000-of-00001/
+    ├── manifests/releases/accepted.jsonl
+    ├── manifests/releases/all.jsonl
+    └── manifests/releases/summary.json
+```
+
+`summary.json`の`total_pairs`が5なら全5文の処理が完了している。
+`accepted_pairs`は日英の両方がQCを通過した文対数である。QC不合格があっても
+試行音声と理由は残るため、`all.jsonl`と音声を確認できる。同じコマンドの
+再実行では完了済みのスモークテストを再利用する。
+
 ## 必要環境
 
 - Windows + Docker Desktop + WSL2 NVIDIA backend、または

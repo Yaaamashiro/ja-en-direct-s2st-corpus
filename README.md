@@ -12,12 +12,28 @@
 
 - BF16対応NVIDIA GPU（VRAM 16 GiB以上）
 - NVIDIA GPUを利用できるDocker
-- コーパス用に80 GiB以上
+- 5文スモークテスト用に1 GiB以上、本番コーパス用に80 GiB以上
 - Hugging Face cache用に8 GiB以上
 
 ## 実行
 
-リポジトリ直下で次の1コマンドを実行します。
+本番GPUで、最初に実コーパス5文だけを生成・検査できます。
+
+```powershell
+docker compose run --build --rm corpus smoke-test
+```
+
+JESCから3文、KFTTから2文を文長別に選び、本番と同じQwen・Whisper・
+QC設定で日英10音声を生成します。結果は`data/smoke/`へ保存され、
+`data/production/`とは混ざりません。
+
+```text
+data/smoke/production/
+├── audio/16k/{ja,en}/
+└── manifests/releases/{accepted,all}.jsonl
+```
+
+スモークテストが完了したら、本番コーパスは次の1コマンドで生成します。
 
 ```powershell
 docker compose run --build --rm corpus
