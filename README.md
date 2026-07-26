@@ -23,9 +23,7 @@
 docker compose run --build --rm corpus smoke-test
 ```
 
-JESCから3文、KFTTから2文を文長別に選び、本番と同じQwen・Whisper・
-QC設定で日英10音声を生成します。結果は`data/smoke/`へ保存され、
-`data/production/`とは混ざりません。
+JESCから3文、KFTTから2文を文長別に選び、本番と同じQwen・Whisper・QC設定で日英10音声を生成します。結果は`data/smoke/`へ保存され、`data/production/`とは混ざりません。
 
 ```text
 data/smoke/production/
@@ -48,8 +46,7 @@ docker compose run --build --rm corpus
 5. Whisperによる日本語CER・英語WER検査と再生成
 6. 全shardの統合とrelease manifest作成
 
-処理はshard単位で保存されます。途中停止した場合も、同じコマンドを
-再実行すれば完了済み処理を再利用します。
+処理はshard単位で保存されます。途中停止した場合も、同じコマンドを再実行すれば完了済み処理を再利用します。
 
 外付けSSDへ保存する場合は、実行前に保存先を指定します。
 
@@ -72,13 +69,8 @@ data/
 └── sources/
 ```
 
-公式配布物、生成音声、モデルcacheはGitへ入りません。データの出典と
-利用条件は [ATTRIBUTION.md](ATTRIBUTION.md)、詳しい再開・個別実行方法は
-[production-runbook.md](docs/production-runbook.md)を参照してください。
+公式配布物、生成音声、モデルcacheはGitへ入りません。データの出典と利用条件は[ATTRIBUTION.md](ATTRIBUTION.md)、詳しい再開・個別実行方法は[production-runbook.md](docs/production-runbook.md)を参照してください。
 
 ## ライセンス
 
-このリポジトリのソースコードは [MIT License](LICENSE) で公開します。
-JESC・KFTTの元テキストと、それらから作成する生成物には、各データセットの
-ライセンス条件が別途適用されます。Qwen3-TTS・Whisperを含む第三者資源の
-詳細は [ATTRIBUTION.md](ATTRIBUTION.md) を確認してください。
+このリポジトリのソースコードは[MIT License](LICENSE)で公開します。JESC・KFTTの元テキストと、それらから作成する生成物には、各データセットのライセンス条件が別途適用されます。Qwen3-TTS・Whisperを含む第三者資源の詳細は[ATTRIBUTION.md](ATTRIBUTION.md)を確認してください。
