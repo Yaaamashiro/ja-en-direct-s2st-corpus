@@ -75,3 +75,10 @@ data/
 公式配布物、生成音声、モデルcacheはGitへ入りません。データの出典と
 利用条件は [ATTRIBUTION.md](ATTRIBUTION.md)、詳しい再開・個別実行方法は
 [production-runbook.md](docs/production-runbook.md)を参照してください。
+
+## ライセンス
+
+このリポジトリのソースコードは [Apache License 2.0](LICENSE) で公開します。
+JESC・KFTTの元テキストと、それらから作成する生成物には、各データセットの
+ライセンス条件が別途適用されます。詳細は [ATTRIBUTION.md](ATTRIBUTION.md)
+を確認してください。

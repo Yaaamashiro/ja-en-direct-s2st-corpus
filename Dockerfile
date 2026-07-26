@@ -30,6 +30,7 @@ RUN python3 -m pip install -r /app/requirements/runtime.txt
 RUN python3 -c "import pyopenjtalk; print(pyopenjtalk.g2p('テスト', kana=True))"
 
 COPY pyproject.toml /app/pyproject.toml
+COPY LICENSE /app/LICENSE
 COPY configs /app/configs
 COPY src /app/src
 COPY tests /app/tests

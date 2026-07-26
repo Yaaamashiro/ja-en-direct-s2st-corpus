@@ -23,8 +23,8 @@ prepare:
   target_train_hours: 300
   jesc_fraction: 0.70
   selection_seed: 20260723
-  # Initial duration estimate. Recalibrate from the 2,000-pair pilot by
-  # creating a new data root and changing only these two fields.
+  # Used only to select the pre-synthesis 300-hour manifest.
+  # Actual release hours are reported after generation.
   ja_chars_per_second: 5.5
   utterance_padding_seconds: 0.5
   short_max_ja_chars: 24
