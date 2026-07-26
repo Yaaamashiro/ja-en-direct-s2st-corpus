@@ -78,7 +78,7 @@ data/
 
 ## ライセンス
 
-このリポジトリのソースコードは [Apache License 2.0](LICENSE) で公開します。
+このリポジトリのソースコードは [MIT License](LICENSE) で公開します。
 JESC・KFTTの元テキストと、それらから作成する生成物には、各データセットの
-ライセンス条件が別途適用されます。詳細は [ATTRIBUTION.md](ATTRIBUTION.md)
-を確認してください。
+ライセンス条件が別途適用されます。Qwen3-TTS・Whisperを含む第三者資源の
+詳細は [ATTRIBUTION.md](ATTRIBUTION.md) を確認してください。
