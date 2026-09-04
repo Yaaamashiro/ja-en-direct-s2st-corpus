@@ -51,7 +51,8 @@ docker compose run --build --rm corpus
 Dockerを使わずGoogle Colab Proで実行する場合は、
 [`notebooks/colab_pro.ipynb`](notebooks/colab_pro.ipynb)をColabで開く。
 ノートブックはGoogle Driveへ音声・manifest・モデルcacheを保存し、切断後も
-最初の未完了shardから再開する。L4/A100ではBF16、T4ではFP16を自動選択する。
+最初の未完了shardから再開する。Colab標準環境とは独立したPython 3.12環境を
+自動作成し、L4/A100ではBF16、T4ではFP16を自動選択する。
 
 Colab用設定は512 shardへ細分化している。`num_shards`は音声生成を開始した後に
 変更しないこと。最初に5文スモークテストを完了し、生成音声とQC結果を確認して
