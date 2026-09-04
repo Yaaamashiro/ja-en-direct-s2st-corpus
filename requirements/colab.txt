@@ -1,0 +1,10 @@
+accelerate==1.12.0
+jiwer==4.0.0
+numpy==2.2.6
+pyopenjtalk-plus==0.4.1.post9
+pytest==8.4.2
+PyYAML==6.0.2
+qwen-tts==0.1.1
+soundfile==0.13.1
+soxr==1.1.0
+transformers==4.57.3

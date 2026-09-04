@@ -64,6 +64,46 @@ def _dtype(torch_module: Any, name: str) -> Any:
         raise ValueError(f"unsupported dtype: {name}") from error
 
 
+def _materialize_hf_model(model_id: str, revision: str) -> str:
+    """Download a pinned model as regular files when a model root is configured.
+
+    Qwen's nested speech-tokenizer loader can resolve a different Hub revision,
+    and the normal Hub cache relies on symlinks that are unsuitable for mounted
+    Drive storage. A local_dir snapshot avoids both problems.
+    """
+    root_value = os.environ.get("S2ST_MODEL_ROOT")
+    if not root_value:
+        return model_id
+
+    from huggingface_hub import snapshot_download
+
+    destination = (
+        Path(root_value)
+        / model_id.replace("/", "--")
+        / revision
+    )
+    marker = destination / ".s2st-complete"
+    required = (
+        destination / "config.json",
+        destination / "model.safetensors",
+        destination / "speech_tokenizer" / "config.json",
+        destination / "speech_tokenizer" / "preprocessor_config.json",
+        destination / "speech_tokenizer" / "model.safetensors",
+    )
+    if not marker.is_file() or not all(path.is_file() for path in required):
+        print(f"[model] materializing {model_id}@{revision} at {destination}")
+        snapshot_download(
+            repo_id=model_id,
+            revision=revision,
+            local_dir=destination,
+        )
+        missing = [str(path) for path in required if not path.is_file()]
+        if missing:
+            raise RuntimeError(f"model snapshot is incomplete: {missing}")
+        marker.write_text(revision + "\n", encoding="utf-8")
+    return str(destination)
+
+
 def plan(config: AppConfig) -> dict[str, Any]:
     manifest = plan_manifest(config.run.input_jsonl, config.run.num_shards)
     estimated_audio_gib = pcm16_storage_gib(
@@ -188,13 +228,20 @@ def _load_qwen(config: AppConfig) -> tuple[Any, Any]:
     import torch
     from qwen_tts import Qwen3TTSModel
 
-    print(f"[tts] loading {config.tts.model_id}@{config.tts.revision}")
-    model = Qwen3TTSModel.from_pretrained(
+    model_source = _materialize_hf_model(
         config.tts.model_id,
-        revision=config.tts.revision,
+        config.tts.revision,
+    )
+    print(f"[tts] loading {config.tts.model_id}@{config.tts.revision}")
+    load_options: dict[str, Any] = {}
+    if model_source == config.tts.model_id:
+        load_options["revision"] = config.tts.revision
+    model = Qwen3TTSModel.from_pretrained(
+        model_source,
         device_map=config.tts.device,
         dtype=_dtype(torch, config.tts.dtype),
         attn_implementation=config.device.attention,
+        **load_options,
     )
     generation = model.model.talker.code_predictor.generation_config
     generation.remove_invalid_values = config.tts.remove_invalid_values
