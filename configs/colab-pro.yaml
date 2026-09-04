@@ -1,0 +1,91 @@
+run:
+  input_jsonl: $S2ST_DATA_ROOT/input/pairs.jsonl
+  output_dir: $S2ST_DATA_ROOT/production
+  # Smaller shards keep a single Colab session bounded. Do not change this after
+  # preparation has started; the shard count is part of the reproducible layout.
+  num_shards: 512
+  max_pairs_per_shard: 800
+  checkpoint_every: 5
+  minimum_free_gib: 80
+  minimum_cache_free_gib: 8
+  maximum_output_gib: 78
+  expected_hours_per_language: 300
+  retry_storage_fraction: 0.10
+  save_native: false
+  resume: true
+
+prepare:
+  sources_dir: $S2ST_DATA_ROOT/sources
+  work_dir: /content/ja-en-direct-s2st-preparation
+  reports_dir: $S2ST_DATA_ROOT/reports/preparation
+  target_train_hours: 300
+  jesc_fraction: 0.70
+  selection_seed: 20260723
+  ja_chars_per_second: 5.5
+  utterance_padding_seconds: 0.5
+  short_max_ja_chars: 24
+  medium_max_ja_chars: 64
+  short_time_fraction: 0.20
+  medium_time_fraction: 0.50
+  long_time_fraction: 0.30
+  include_dev: true
+  include_test: true
+
+sources:
+  jesc:
+    url: https://nlp.stanford.edu/projects/jesc/data/split.tar.gz
+    archive_name: jesc-split-2019-05-12.tar.gz
+    sha256: 9cc6f2b31225d84b204a1bc4599e5fbb158d5739ba4aa76eab30fea05ed8ccd5
+    version: "2019-05-12"
+    license_id: CC-BY-SA-4.0
+  kftt:
+    url: https://www.phontron.com/kftt/download/kftt-data-1.0.tar.gz
+    archive_name: kftt-data-1.0.tar.gz
+    sha256: fcfcaa670d6d59aa691b0e909c0d7c393852dd2fb1d6310fda9b3282dc6d1638
+    version: "1.0"
+    license_id: CC-BY-SA-3.0
+
+smoke:
+  input_jsonl: $S2ST_DATA_ROOT/smoke/input/pairs.jsonl
+  output_dir: $S2ST_DATA_ROOT/smoke/production
+  pair_count: 5
+  minimum_free_gib: 1
+  maximum_output_gib: 1
+
+device:
+  require_cuda: true
+  # A Colab T4 reports about 14.7 GiB. L4/A100 also pass this threshold.
+  minimum_vram_gib: 14
+  require_bf16: false
+  attention: sdpa
+
+tts:
+  model_id: Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+  revision: f00cf133b78d3c2c35857faba3b1be9b98c4f971
+  device: cuda:0
+  # BF16 on L4/A100, FP16 on T4 and other GPUs without native BF16.
+  dtype: auto
+  speaker: Ono_Anna
+  instruct: ""
+  max_new_tokens: 2048
+  do_sample: true
+  subtalker_do_sample: true
+  remove_invalid_values: false
+  renormalize_logits: true
+  output_sample_rate: 16000
+  max_content_retries: 1
+
+asr:
+  model_id: openai/whisper-large-v3-turbo
+  revision: 60be3615a4d667e1258e8ad29130467587c489aa
+  dtype: float16
+  attention: sdpa
+  do_sample: false
+  num_beams: 1
+  condition_on_prev_tokens: false
+
+qc:
+  max_ja_cer: 0.10
+  max_en_wer: 0.10
+  min_duration_seconds: 0.7
+  max_duration_seconds: 30.0

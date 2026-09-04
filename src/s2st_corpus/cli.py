@@ -41,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("plan", help="Validate the input manifest and estimate storage.")
     shard = commands.add_parser("run-shard", help="Synthesize and QC one stable shard.")
     shard.add_argument("--shard-index", type=int, required=True)
+    commands.add_parser(
+        "run-next-shard",
+        help="Resume the first shard without a completed QC manifest.",
+    )
+    commands.add_parser("status", help="Report completed and remaining shards.")
     merge = commands.add_parser("consolidate", help="Build release manifests.")
     merge.add_argument("--allow-incomplete", action="store_true")
     return parser
@@ -105,6 +110,21 @@ def main() -> None:
         result = plan(config)
     elif args.command == "run-shard":
         result = {"manifest": str(run_shard(config, args.shard_index))}
+    elif args.command in {"run-next-shard", "status"}:
+        completed = []
+        remaining = []
+        for index in range(config.run.num_shards):
+            name = f"shard-{index:05d}-of-{config.run.num_shards:05d}.jsonl"
+            path = config.run.output_dir / "manifests" / "qc" / name
+            (completed if path.is_file() else remaining).append(index)
+        result = {
+            "completed_shards": len(completed),
+            "remaining_shards": len(remaining),
+            "next_shard": remaining[0] if remaining else None,
+            "total_shards": config.run.num_shards,
+        }
+        if args.command == "run-next-shard" and remaining:
+            result["manifest"] = str(run_shard(config, remaining[0]))
     else:
         result = consolidate(config, allow_incomplete=args.allow_incomplete)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

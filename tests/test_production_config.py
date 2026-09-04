@@ -25,3 +25,21 @@ def test_production_profile_is_pinned_and_storage_bounded() -> None:
     assert config.sources["kftt"].version == "1.0"
     assert config.smoke.pair_count == 5
     assert config.smoke.output_dir != config.run.output_dir
+
+
+def test_colab_profile_expands_drive_root_and_selects_dtype_at_runtime(
+    monkeypatch,
+) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    data_root = repository / "colab-drive-test"
+    monkeypatch.setenv("S2ST_DATA_ROOT", str(data_root))
+
+    config = load_config(repository / "configs" / "colab-pro.yaml")
+
+    assert config.run.input_jsonl == data_root / "input" / "pairs.jsonl"
+    assert config.run.output_dir == data_root / "production"
+    assert config.run.num_shards == 512
+    assert config.run.resume is True
+    assert config.device.minimum_vram_gib == 14
+    assert config.device.require_bf16 is False
+    assert config.tts.dtype == "auto"

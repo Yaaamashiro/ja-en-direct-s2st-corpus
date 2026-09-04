@@ -46,6 +46,17 @@ docker compose run --build --rm corpus
 5. Whisperによる日本語CER・英語WER検査と再生成
 6. 全shardの統合とrelease manifest作成
 
+### Google Colab Pro
+
+Dockerを使わずGoogle Colab Proで実行する場合は、
+[`notebooks/colab_pro.ipynb`](notebooks/colab_pro.ipynb)をColabで開く。
+ノートブックはGoogle Driveへ音声・manifest・モデルcacheを保存し、切断後も
+最初の未完了shardから再開する。L4/A100ではBF16、T4ではFP16を自動選択する。
+
+Colab用設定は512 shardへ細分化している。`num_shards`は音声生成を開始した後に
+変更しないこと。最初に5文スモークテストを完了し、生成音声とQC結果を確認して
+から本番shardを開始する。
+
 処理はshard単位で保存されます。途中停止した場合も、同じコマンドを再実行すれば完了済み処理を再利用します。
 
 外付けSSDへ保存する場合は、実行前に保存先を指定します。

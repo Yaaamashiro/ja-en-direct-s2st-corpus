@@ -47,6 +47,12 @@ def _release_cuda(torch_module: Any) -> None:
 
 
 def _dtype(torch_module: Any, name: str) -> Any:
+    if name == "auto":
+        return (
+            torch_module.bfloat16
+            if torch_module.cuda.is_bf16_supported()
+            else torch_module.float16
+        )
     values = {
         "float16": torch_module.float16,
         "bfloat16": torch_module.bfloat16,
@@ -110,6 +116,7 @@ def gpu_preflight(config: AppConfig) -> dict[str, Any]:
         "gpu": properties.name,
         "vram_gib": round(vram_gib, 2),
         "bf16_supported": bf16_supported,
+        "tts_dtype": str(_dtype(torch, config.tts.dtype)).removeprefix("torch."),
     }
 
 
@@ -476,7 +483,10 @@ def _finalize_record(config: AppConfig, record: dict[str, Any]) -> dict[str, Any
             "tts_model_id": config.tts.model_id,
             "tts_model_revision": config.tts.revision,
             "tts_speaker_id": config.tts.speaker,
-            "tts_dtype": config.tts.dtype,
+            "tts_dtype": (
+                str(_dtype(__import__("torch"), config.tts.dtype))
+                .removeprefix("torch.")
+            ),
             "qc_asr_model_id": config.asr.model_id,
             "qc_asr_model_revision": config.asr.revision,
         }

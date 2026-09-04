@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -122,17 +123,21 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
     return value
 
 
+def _path(value: str) -> Path:
+    return Path(os.path.expandvars(value)).expanduser()
+
+
 def load_config(path: Path) -> AppConfig:
     with path.open("r", encoding="utf-8") as handle:
         raw = _mapping(yaml.safe_load(handle), "config")
 
     run_values = _mapping(raw.get("run"), "run").copy()
-    run_values["input_jsonl"] = Path(run_values["input_jsonl"])
-    run_values["output_dir"] = Path(run_values["output_dir"])
+    run_values["input_jsonl"] = _path(run_values["input_jsonl"])
+    run_values["output_dir"] = _path(run_values["output_dir"])
     run = RunConfig(**run_values)
     prepare_values = _mapping(raw.get("prepare"), "prepare").copy()
     for key in ("sources_dir", "work_dir", "reports_dir"):
-        prepare_values[key] = Path(prepare_values[key])
+        prepare_values[key] = _path(prepare_values[key])
     prepare = PrepareConfig(**prepare_values)
     source_values = _mapping(raw.get("sources"), "sources")
     sources = {
@@ -141,7 +146,7 @@ def load_config(path: Path) -> AppConfig:
     }
     smoke_values = _mapping(raw.get("smoke"), "smoke").copy()
     for key in ("input_jsonl", "output_dir"):
-        smoke_values[key] = Path(smoke_values[key])
+        smoke_values[key] = _path(smoke_values[key])
     smoke = SmokeConfig(**smoke_values)
     device = DeviceConfig(**_mapping(raw.get("device"), "device"))
     tts = TTSConfig(**_mapping(raw.get("tts"), "tts"))
@@ -207,12 +212,18 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("run.retry_storage_fraction must be between 0 and 1")
     if tts.max_content_retries not in (0, 1):
         raise ValueError("tts.max_content_retries must be 0 or 1")
-    if tts.device != "cuda:0" or tts.dtype != "bfloat16":
-        raise ValueError("production Qwen must use cuda:0 and bfloat16")
+    if tts.device != "cuda:0":
+        raise ValueError("Qwen must use cuda:0")
+    if tts.dtype not in {"auto", "float16", "bfloat16"}:
+        raise ValueError("Qwen dtype must be auto, float16, or bfloat16")
     if asr.dtype != "float16":
         raise ValueError("production Whisper must use float16")
-    if not device.require_cuda or not device.require_bf16:
-        raise ValueError("production profile must require CUDA and BF16")
+    if not device.require_cuda:
+        raise ValueError("the corpus pipeline requires CUDA")
+    if device.minimum_vram_gib <= 0:
+        raise ValueError("device.minimum_vram_gib must be positive")
+    if device.require_bf16 and tts.dtype == "float16":
+        raise ValueError("a BF16-required profile cannot select float16")
     if tts.output_sample_rate != 16000:
         raise ValueError("canonical corpus audio must be 16 kHz")
     if not (0 <= qc.max_ja_cer <= 1 and 0 <= qc.max_en_wer <= 1):
