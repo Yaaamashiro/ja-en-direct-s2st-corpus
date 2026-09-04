@@ -59,6 +59,11 @@ Colab用設定は512 shardへ細分化している。`num_shards`は音声生成
 変更しないこと。最初に5文スモークテストを完了し、生成音声とQC結果を確認して
 から本番shardを開始する。
 
+Colabの既存TorchCodecは固定torchと互換性がない場合があるため、セットアップで
+アンインストールする（WAV入力はFFmpegで読み込む）。ASRの実行エラーは即時停止する。
+保存済みスモーク音声の再検査は `python -m s2st_corpus.cli --config configs/colab-pro.yaml recheck-smoke`。
+旧レポートを `smoke/production/qc-backups` に保存し、音声生成を行わずQCと集計を更新する。
+
 処理はshard単位で保存されます。途中停止した場合も、同じコマンドを再実行すれば完了済み処理を再利用します。
 
 外付けSSDへ保存する場合は、実行前に保存先を指定します。

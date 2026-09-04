@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .config import load_config
 from .corpora import prepare_corpora
-from .runner import consolidate, plan, run_shard
+from .runner import consolidate, plan, recheck_shard, run_shard
 from .smoke import select_smoke_pairs, smoke_app_config
 
 
@@ -39,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the production TTS and Whisper pipeline on five corpus pairs.",
     )
     commands.add_parser("plan", help="Validate the input manifest and estimate storage.")
+    commands.add_parser("recheck-smoke", help="Recheck saved smoke audio without TTS; back up old reports.")
     shard = commands.add_parser("run-shard", help="Synthesize and QC one stable shard.")
     shard.add_argument("--shard-index", type=int, required=True)
     commands.add_parser(
@@ -106,6 +107,11 @@ def main() -> None:
                 ),
             },
         }
+    elif args.command == "recheck-smoke":
+        smoke_config = smoke_app_config(config)
+        recheck_shard(smoke_config, 0)
+        result = consolidate(smoke_config)
+        result["all_pairs_accepted"] = result["accepted_pairs"] == config.smoke.pair_count
     elif args.command == "plan":
         result = plan(config)
     elif args.command == "run-shard":

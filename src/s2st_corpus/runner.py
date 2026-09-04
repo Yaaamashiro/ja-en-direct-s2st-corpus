@@ -4,7 +4,9 @@ import gc
 import json
 import os
 import platform
+import shutil
 import time
+from datetime import datetime, timezone
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -451,6 +453,9 @@ def _evaluate_attempt(
             raise
         reasons.append("asr_failed")
         attempt["asr_error"] = f"{type(error).__name__}: {error}"
+        raise RuntimeError(
+            f"ASR/QC failed for {record['pair_id']} ({language}): {error}"
+        ) from error
     attempt["qc_reasons"] = reasons
     attempt["qc_pass"] = not reasons
 
@@ -630,6 +635,51 @@ def run_shard(config: AppConfig, shard_index: int) -> Path:
         f"[done] shard={shard_index} pairs={len(finalized)} "
         f"accepted={len(finalized) - len(failures)} rejected={len(failures)}"
     )
+    return final_path
+
+
+def recheck_shard(config: AppConfig, shard_index: int) -> Path:
+    """Re-evaluate completed audio without synthesis, preserving previous reports."""
+    import pyopenjtalk
+
+    name = _shard_name(shard_index, config.run.num_shards)
+    root = config.run.output_dir
+    final_path = root / "manifests" / "qc" / f"{name}.jsonl"
+    if not final_path.is_file():
+        raise FileNotFoundError(f"Completed QC manifest required: {final_path}")
+    records = list(read_jsonl(final_path))
+    if not records:
+        raise ValueError("No saved records to recheck")
+    for record in records:
+        for attempts in record["attempts"].values():
+            for attempt in attempts:
+                if attempt.get("generation_status") == "ok" and not Path(attempt["wav_16k"]).is_file():
+                    raise FileNotFoundError(attempt["wav_16k"])
+    backup = root / "qc-backups" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    for directory in ("manifests", "failures"):
+        if (root / directory).is_dir():
+            shutil.copytree(root / directory, backup / directory)
+    print(f"[recheck] previous reports backed up: {backup}", flush=True)
+    transcriber, processor, model, torch_module = _load_whisper(config)
+    try:
+        for record in records:
+            for language in ("ja", "en"):
+                for attempt in record["attempts"][language]:
+                    for key in ("qc_pass", "qc_reasons", "asr_error", "asr_text", "asr_seconds",
+                                "reference_eval_norm", "asr_eval_norm", "metric", "cer", "wer"):
+                        attempt.pop(key, None)
+                    _evaluate_attempt(config, record, language, attempt,
+                                      transcriber, processor, pyopenjtalk.g2p)
+                    print(f"[recheck] {record['pair_id']} {language} attempt={attempt['attempt']} "
+                          f"pass={attempt['qc_pass']} reasons={attempt['qc_reasons']}", flush=True)
+    finally:
+        del transcriber, processor, model
+        _release_cuda(torch_module)
+    finalized = [_finalize_record(config, record) for record in records]
+    write_checkpoint(root / "manifests" / "generated" / f"{name}.jsonl", records)
+    write_checkpoint(final_path, finalized)
+    write_checkpoint(root / "failures" / f"{name}.jsonl",
+                     [r for r in finalized if r["qc_status"] != "accepted"])
     return final_path
 
 
