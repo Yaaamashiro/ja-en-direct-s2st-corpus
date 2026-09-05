@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume the first shard without a completed QC manifest.",
     )
     commands.add_parser("status", help="Report completed and remaining shards.")
+    commands.add_parser("run-remaining-shards", help="Run all unfinished shards sequentially, then consolidate.")
     merge = commands.add_parser("consolidate", help="Build release manifests.")
     merge.add_argument("--allow-incomplete", action="store_true")
     return parser
@@ -116,7 +117,7 @@ def main() -> None:
         result = plan(config)
     elif args.command == "run-shard":
         result = {"manifest": str(run_shard(config, args.shard_index))}
-    elif args.command in {"run-next-shard", "status"}:
+    elif args.command in {"run-next-shard", "run-remaining-shards", "status"}:
         completed = []
         remaining = []
         for index in range(config.run.num_shards):
@@ -131,6 +132,17 @@ def main() -> None:
         }
         if args.command == "run-next-shard" and remaining:
             result["manifest"] = str(run_shard(config, remaining[0]))
+            completed.append(remaining.pop(0))
+        elif args.command == "run-remaining-shards":
+            for index in remaining.copy():
+                print(f"[run-all] shard={index} completed={len(completed)}/{config.run.num_shards}", flush=True)
+                result["manifest"] = str(run_shard(config, index))
+                completed.append(index)
+                remaining.remove(index)
+                print(f"[run-all] completed={len(completed)}/{config.run.num_shards} remaining={len(remaining)}", flush=True)
+            result["release"] = consolidate(config)
+        result.update(completed_shards=len(completed), remaining_shards=len(remaining),
+                      next_shard=remaining[0] if remaining else None)
     else:
         result = consolidate(config, allow_incomplete=args.allow_incomplete)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
