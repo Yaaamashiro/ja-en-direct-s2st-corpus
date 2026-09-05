@@ -159,6 +159,8 @@ def gpu_preflight(config: AppConfig) -> dict[str, Any]:
         "vram_gib": round(vram_gib, 2),
         "bf16_supported": bf16_supported,
         "tts_dtype": str(_dtype(torch, config.tts.dtype)).removeprefix("torch."),
+        "tts_batch_size": config.tts.batch_size,
+        "asr_batch_size": config.asr.batch_size,
     }
 
 
@@ -259,6 +261,7 @@ def _generate_attempt(
     record: dict[str, Any],
     language: str,
     attempt: int,
+    generated: tuple[Any, int] | None = None,
 ) -> dict[str, Any]:
     native_path, canonical_path = _paths(
         config, shard_name, record["pair_id"], language, attempt
@@ -267,18 +270,22 @@ def _generate_attempt(
     started = time.perf_counter()
     try:
         if not (config.run.resume and _valid_existing(canonical_path, config)):
-            seed_everything(seed, torch_module)
-            waveforms, sample_rate = model.generate_custom_voice(
-                text=record[f"{language}_tts_text"],
-                language="Japanese" if language == "ja" else "English",
-                speaker=config.tts.speaker,
-                instruct=config.tts.instruct,
-                max_new_tokens=config.tts.max_new_tokens,
-                do_sample=config.tts.do_sample,
-                subtalker_dosample=config.tts.subtalker_do_sample,
-                remove_invalid_values=config.tts.remove_invalid_values,
-                renormalize_logits=config.tts.renormalize_logits,
-            )
+            if generated is None:
+                seed_everything(seed, torch_module)
+                waveforms, sample_rate = model.generate_custom_voice(
+                    text=record[f"{language}_tts_text"],
+                    language="Japanese" if language == "ja" else "English",
+                    speaker=config.tts.speaker,
+                    instruct=config.tts.instruct,
+                    max_new_tokens=config.tts.max_new_tokens,
+                    do_sample=config.tts.do_sample,
+                    subtalker_dosample=config.tts.subtalker_do_sample,
+                    remove_invalid_values=config.tts.remove_invalid_values,
+                    renormalize_logits=config.tts.renormalize_logits,
+                )
+            else:
+                waveform, sample_rate = generated
+                waveforms = [waveform]
             waveform = mono_float32(np.asarray(waveforms[0]))
             canonical = resample_mono(
                 waveform, int(sample_rate), config.tts.output_sample_rate
@@ -335,6 +342,9 @@ def _generate_missing(
     }
     if not missing:
         return
+    if config.tts.batch_size > 1:
+        _generate_missing_batched(config, shard_name, records, attempt, missing, checkpoint_path)
+        return
     model, torch_module = _load_qwen(config)
     changed = 0
     try:
@@ -366,6 +376,65 @@ def _generate_missing(
                 if changed % config.run.checkpoint_every == 0:
                     write_checkpoint(checkpoint_path, records)
         write_checkpoint(checkpoint_path, records)
+    finally:
+        del model
+        _release_cuda(torch_module)
+
+
+def _generate_missing_batched(config, shard_name, records, attempt, missing, checkpoint_path):
+    model, torch_module = _load_qwen(config)
+    completed = 0
+    try:
+        for language in ("ja", "en"):
+            pending = [r for r in records if (r["pair_id"], language) in missing]
+            pending.sort(key=lambda r: (len(r[f"{language}_tts_text"]), r["pair_id"]))
+            for start in range(0, len(pending), config.tts.batch_size):
+                group = pending[start:start + config.tts.batch_size]
+                # Recover already-written audio after an interrupted checkpoint write.
+                fresh = []
+                for record in group:
+                    _, path = _paths(config, shard_name, record["pair_id"], language, attempt)
+                    if config.run.resume and _valid_existing(path, config):
+                        result = _generate_attempt(model, torch_module, config, shard_name,
+                                                   record, language, attempt)
+                        # The seed provenance of an orphaned batch WAV is unknown.
+                        result.update(seed=None, seed_scope="recovered_audio")
+                        record["attempts"][language].append(result)
+                        completed += 1
+                    else:
+                        fresh.append(record)
+                if fresh:
+                    ids = [r["pair_id"] for r in fresh]
+                    seed = deterministic_seed(json.dumps(ids), language, attempt)
+                    seed_everything(seed, torch_module)
+                    started = time.perf_counter()
+                    waveforms, rate = model.generate_custom_voice(
+                        text=[r[f"{language}_tts_text"] for r in fresh],
+                        language="Japanese" if language == "ja" else "English",
+                        speaker=config.tts.speaker, instruct=config.tts.instruct,
+                        max_new_tokens=config.tts.max_new_tokens,
+                        do_sample=config.tts.do_sample,
+                        subtalker_dosample=config.tts.subtalker_do_sample,
+                        remove_invalid_values=config.tts.remove_invalid_values,
+                        renormalize_logits=config.tts.renormalize_logits,
+                    )
+                    if len(waveforms) != len(fresh):
+                        raise RuntimeError("Qwen batch output count does not match inputs")
+                    elapsed = round(time.perf_counter() - started, 3)
+                    for record, waveform in zip(fresh, waveforms):
+                        result = _generate_attempt(model, torch_module, config, shard_name,
+                                                   record, language, attempt, (waveform, rate))
+                        result.update(seed=seed, seed_scope="batch", batch_pair_ids=ids,
+                                      tts_batch_size=len(fresh), tts_batch_seconds=elapsed,
+                                      tts_seconds=round(elapsed / len(fresh), 3))
+                        record["attempts"][language].append(result)
+                        completed += 1
+                write_checkpoint(checkpoint_path, records)
+                print(f"[tts-batch] {completed}/{len(missing)} {language} attempt={attempt} "
+                      f"batch_size={len(fresh)}", flush=True)
+    except Exception:
+        write_checkpoint(checkpoint_path, records)
+        raise
     finally:
         del model
         _release_cuda(torch_module)
@@ -416,7 +485,10 @@ def _evaluate_attempt(
         return
     duration = float(attempt["duration"])
     if not config.qc.min_duration_seconds <= duration <= config.qc.max_duration_seconds:
-        reasons.append("duration_out_of_range")
+        attempt.pop("asr_error", None)
+        attempt["qc_pass"] = False
+        attempt["qc_reasons"] = ["duration_out_of_range"]
+        return
     try:
         started = time.perf_counter()
         result = transcriber(
@@ -428,10 +500,11 @@ def _evaluate_attempt(
                 "num_beams": config.asr.num_beams,
                 "condition_on_prev_tokens": config.asr.condition_on_prev_tokens,
             },
-            return_timestamps=False,
+            return_timestamps=duration > 30.0,
         )
         asr_text = result["text"].strip()
         attempt["asr_text"] = asr_text
+        attempt.pop("asr_error", None)
         attempt["asr_seconds"] = round(time.perf_counter() - started, 3)
         if language == "ja":
             reference = japanese_reading_normalize(record["ja_tts_text"], g2p)
@@ -473,6 +546,14 @@ def _qc_unchecked(
 ) -> None:
     import pyopenjtalk
 
+    pending = [(r, lang, a) for r in records for lang in ("ja", "en")
+               for a in r["attempts"][lang]
+               if a["attempt"] == only_attempt and "qc_pass" not in a]
+    if not pending:
+        return
+    if config.asr.batch_size > 1:
+        _qc_batched(config, records, pending, checkpoint_path, pyopenjtalk.g2p)
+        return
     transcriber, processor, model, torch_module = _load_whisper(config)
     changed = 0
     try:
@@ -505,6 +586,58 @@ def _qc_unchecked(
         del transcriber
         del processor
         del model
+        _release_cuda(torch_module)
+
+
+def _qc_batched(config, records, pending, checkpoint_path, g2p):
+    eligible = []
+    for record, language, attempt in pending:
+        if (attempt.get("generation_status") != "ok" or not
+                config.qc.min_duration_seconds <= float(attempt["duration"]) <= config.qc.max_duration_seconds):
+            _evaluate_attempt(config, record, language, attempt, None, None, g2p)
+        else:
+            eligible.append((record, language, attempt))
+    write_checkpoint(checkpoint_path, records)
+    if not eligible:
+        return
+    transcriber, processor, model, torch_module = _load_whisper(config)
+    completed = len(pending) - len(eligible)
+    try:
+        for language in ("ja", "en"):
+            # Separate long-form inputs if a custom QC profile permits >30 seconds.
+            for longform in (False, True):
+                items = [item for item in eligible if item[1] == language
+                         and (float(item[2]["duration"]) > 30.0) == longform]
+                items.sort(key=lambda item: float(item[2]["duration"]))
+                for start in range(0, len(items), config.asr.batch_size):
+                    group = items[start:start + config.asr.batch_size]
+                    started = time.perf_counter()
+                    outputs = list(transcriber(
+                        [a["wav_16k"] for _, _, a in group],
+                        batch_size=len(group), num_workers=0,
+                        generate_kwargs={"language": "japanese" if language == "ja" else "english",
+                                         "task": "transcribe", "do_sample": config.asr.do_sample,
+                                         "num_beams": config.asr.num_beams,
+                                         "condition_on_prev_tokens": config.asr.condition_on_prev_tokens},
+                        return_timestamps=longform,
+                    ))
+                    elapsed = round(time.perf_counter() - started, 3)
+                    if len(outputs) != len(group):
+                        raise RuntimeError("Whisper batch output count does not match inputs")
+                    for (record, lang, attempt), output in zip(group, outputs):
+                        _evaluate_attempt(config, record, lang, attempt,
+                                          lambda *args, result=output, **kwargs: result, processor, g2p)
+                        attempt.update(asr_batch_size=len(group), asr_batch_seconds=elapsed,
+                                       asr_seconds=round(elapsed / len(group), 3))
+                        completed += 1
+                    write_checkpoint(checkpoint_path, records)
+                    print(f"[qc-batch] {completed}/{len(pending)} {language} batch_size={len(group)} "
+                          f"seconds={elapsed}", flush=True)
+    except Exception:
+        write_checkpoint(checkpoint_path, records)
+        raise
+    finally:
+        del transcriber, processor, model
         _release_cuda(torch_module)
 
 

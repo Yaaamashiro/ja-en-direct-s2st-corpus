@@ -84,6 +84,7 @@ class TTSConfig:
     renormalize_logits: bool
     output_sample_rate: int
     max_content_retries: int
+    batch_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class ASRConfig:
     do_sample: bool
     num_beams: int
     condition_on_prev_tokens: bool
+    batch_size: int = 1
 
 
 @dataclass(frozen=True)
@@ -149,8 +151,13 @@ def load_config(path: Path) -> AppConfig:
         smoke_values[key] = _path(smoke_values[key])
     smoke = SmokeConfig(**smoke_values)
     device = DeviceConfig(**_mapping(raw.get("device"), "device"))
-    tts = TTSConfig(**_mapping(raw.get("tts"), "tts"))
-    asr = ASRConfig(**_mapping(raw.get("asr"), "asr"))
+    tts_values = _mapping(raw.get("tts"), "tts").copy()
+    asr_values = _mapping(raw.get("asr"), "asr").copy()
+    for values, name in ((tts_values, "S2ST_TTS_BATCH_SIZE"), (asr_values, "S2ST_ASR_BATCH_SIZE")):
+        if name in os.environ:
+            values["batch_size"] = int(os.environ[name])
+    tts = TTSConfig(**tts_values)
+    asr = ASRConfig(**asr_values)
     qc = QCConfig(**_mapping(raw.get("qc"), "qc"))
 
     if run.num_shards < 1:
@@ -212,6 +219,8 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("run.retry_storage_fraction must be between 0 and 1")
     if tts.max_content_retries not in (0, 1):
         raise ValueError("tts.max_content_retries must be 0 or 1")
+    if any(type(size) is not int or size < 1 for size in (tts.batch_size, asr.batch_size)):
+        raise ValueError("tts.batch_size and asr.batch_size must be positive integers")
     if tts.device != "cuda:0":
         raise ValueError("Qwen must use cuda:0")
     if tts.dtype not in {"auto", "float16", "bfloat16"}:

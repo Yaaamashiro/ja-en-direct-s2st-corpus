@@ -64,6 +64,16 @@ Colabの既存TorchCodecは固定torchと互換性がない場合があるため
 保存済みスモーク音声の再検査は `python -m s2st_corpus.cli --config configs/colab-pro.yaml recheck-smoke`。
 旧レポートを `smoke/production/qc-backups` に保存し、音声生成を行わずQCと集計を更新する。
 
+A100でのバッチ実行は、Colabセルで `os.environ['S2ST_TTS_BATCH_SIZE'] = '4'` と
+`os.environ['S2ST_ASR_BATCH_SIZE'] = '8'` を設定してから本番セルを実行する。
+未設定時は各1件。YAMLの `tts.batch_size` / `asr.batch_size` でも設定できる。
+生成は言語・文章長、ASRは言語・音声長でまとめ、バッチごとに進捗を保存する。
+既存の生成・QC結果を再利用し、完了済みshardやshard数は変更しない。
+TTSの乱数はバッチ単位になるため単件実行と同一波形にはならない。
+seed・バッチ内pair IDを記録するが、バッチ構成やサイズを変えた再生成は同一性を保証しない。
+バッチサイズ4/8の速度・VRAMは実機で確認すること。OOM時はサイズを下げて再開する。
+QCの長さ制限を外れた音声はASR前に不合格とする。
+
 処理はshard単位で保存されます。途中停止した場合も、同じコマンドを再実行すれば完了済み処理を再利用します。
 
 外付けSSDへ保存する場合は、実行前に保存先を指定します。
