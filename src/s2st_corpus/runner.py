@@ -358,6 +358,11 @@ def _generate_missing(
                     )
                 )
                 changed += 1
+                print(
+                    f"[tts] {changed}/{len(missing)} {record['pair_id']} {language} "
+                    f"attempt={attempt} status={attempts[-1]['generation_status']}",
+                    flush=True,
+                )
                 if changed % config.run.checkpoint_every == 0:
                     write_checkpoint(checkpoint_path, records)
         write_checkpoint(checkpoint_path, records)
@@ -479,16 +484,20 @@ def _qc_unchecked(
                         or "qc_pass" in attempt
                     ):
                         continue
-                    _evaluate_attempt(
-                        config,
-                        record,
-                        language,
-                        attempt,
-                        transcriber,
-                        processor,
-                        pyopenjtalk.g2p,
-                    )
+                    try:
+                        _evaluate_attempt(
+                            config, record, language, attempt,
+                            transcriber, processor, pyopenjtalk.g2p,
+                        )
+                    except Exception:
+                        write_checkpoint(checkpoint_path, records)
+                        raise
                     changed += 1
+                    print(
+                        f"[qc] checked={changed} {record['pair_id']} {language} "
+                        f"attempt={only_attempt} pass={attempt['qc_pass']} "
+                        f"reasons={attempt['qc_reasons']}", flush=True,
+                    )
                     if changed % config.run.checkpoint_every == 0:
                         write_checkpoint(checkpoint_path, records)
         write_checkpoint(checkpoint_path, records)
