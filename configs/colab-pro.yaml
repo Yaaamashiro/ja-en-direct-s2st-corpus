@@ -6,9 +6,11 @@ run:
   num_shards: 512
   max_pairs_per_shard: 800
   checkpoint_every: 5
-  minimum_free_gib: 80
+  # Existing output plus available space must cover the full run budget.
+  minimum_free_gib: 160
   minimum_cache_free_gib: 8
-  maximum_output_gib: 78
+  # Includes all attempts, rejected audio, and manifests, not just accepted pairs.
+  maximum_output_gib: 160
   expected_hours_per_language: 300
   retry_storage_fraction: 0.10
   save_native: false

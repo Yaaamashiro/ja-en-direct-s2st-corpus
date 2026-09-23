@@ -67,7 +67,7 @@ Colabの「ランタイムのタイプを変更」でGPUを選び、以下の順
 | 5. バッチ件数 | 同時に処理する音声数を設定します |
 | 初回だけ：5文スモークテスト | JESC・KFTTを準備し、5ペアの日英音声を生成・検査します |
 
-Python 3.13とA100 80GBで実行した構成です。GPU確認はVRAM 14 GiB以上を条件とし、BF16対応GPUではBF16、それ以外ではFP16を選択します。本番データ用にDriveの容量を確保してください。設定上の本番容量予算は80 GiB、モデルキャッシュ用はローカルに8 GiBです。スモークテストの出力予算は1 GiBです。
+Python 3.13とA100 80GBで実行した構成です。GPU確認はVRAM 14 GiB以上を条件とし、BF16対応GPUではBF16、それ以外ではFP16を選択します。Colab用設定の本番出力上限は160 GiBで、採用音声だけでなく再生成・除外音声とmanifestも含みます。容量チェックは既存の本番出力とファイルシステムの報告する空き容量の合計が160 GiB以上あるかを確認します。Driveのアカウント全体の容量も別途確認してください。モデルキャッシュ用はローカルに8 GiB、スモークテストの出力予算は1 GiBです。
 
 スモークテストは `all_pairs_accepted: true` と採用音声の試聴で確認します。`returncode: 0` はコマンドの正常終了を示すだけで、すべての音声の品質合格を意味しません。結果は本番と分離した `smoke/production/` に保存されます。
 
@@ -185,6 +185,7 @@ CU残量の自動取得・購入や、Colabランタイムへの自動再接続�
 
 #### よくある問題
 
+- **`output safety limit exceeded`**：Driveの満杯を直接示すものではなく、`run.maximum_output_gib` に指定した本番出力上限を超えたという通知です。旧Colab設定は78 GiBでした。Driveに十分な空き容量がある場合は最新コードを取得し、160 GiBの設定で再開してください。shard数や保存先を変えたり、既存音声を削除したりする必要はありません。
 - **`flash-attn is not installed`**：追加の高速化ライブラリがないという案内です。現在は `sdpa` を指定しており、この表示だけで失敗ではありません。
 - **`operator torchvision::nms does not exist`**：torchとtorchvisionの不整合が疑われます。ノートブックのセットアップはtorch 2.7.1・torchvision 0.22.1・torchaudio 2.7.1を同じCUDA 12.6配布元から導入します。
 - **`Could not load libtorchcodec`**：既存TorchCodecとの不整合を避けるため、セットアップでTorchCodecを削除します。このパイプラインのWAV入力はFFmpegで読み込みます。
