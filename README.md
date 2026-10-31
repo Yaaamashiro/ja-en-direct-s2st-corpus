@@ -236,6 +236,8 @@ data/
 
 公式配布物、生成音声、モデルcacheはGitへ入りません。データの出典と利用条件は[ATTRIBUTION.md](ATTRIBUTION.md)、詳しい再開・個別実行方法は[production-runbook.md](docs/production-runbook.md)を参照してください。
 
+全profileのrelease `all.jsonl` は `config.run.input_jsonl` の行順を保証し、`accepted.jsonl` はその順序を保った採用subsetです（途中集計も同様）。完全なreleaseでは入力とQC結果のpair_id集合一致を検査し、不足・余分・重複を拒否します。`summary.json` に `release_order: "input_manifest"` と `missing_pair_count` を記録します。
+
 ## New Kokoro + JParaCrawl profile
 
 ```text

@@ -30,6 +30,7 @@ from .normalization import (
 )
 from .config import AppConfig
 from .manifest import (
+    iter_pairs,
     pairs_for_shard,
     pcm16_storage_gib,
     plan_manifest,
@@ -933,7 +934,7 @@ def recheck_shard(config: AppConfig, shard_index: int) -> Path:
 
 def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, Any]:
     provenance = ensure_identity(config) if is_external(config) else None
-    rows: list[dict[str, Any]] = []
+    qc_by_id: dict[str, dict[str, Any]] = {}
     missing: list[int] = []
     for shard_index in range(config.run.num_shards):
         name = _shard_name(shard_index, config.run.num_shards)
@@ -945,14 +946,39 @@ def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, 
         if provenance is not None:
             expected = pairs_for_shard(config.run.input_jsonl, shard_index, config.run.num_shards, config.run.max_pairs_per_shard)
             validate_records(config, expected, shard_rows, provenance, complete=True)
-        rows.extend(shard_rows)
+        for row in shard_rows:
+            pair_id = row["pair_id"]
+            if pair_id in qc_by_id:
+                raise RuntimeError("duplicate pair_id found across shard manifests")
+            qc_by_id[pair_id] = row
     if missing and not allow_incomplete:
         raise RuntimeError(
             f"{len(missing)} shard manifests are missing; first missing={missing[:10]}"
         )
-    ids = [row["pair_id"] for row in rows]
-    if len(ids) != len(set(ids)):
-        raise RuntimeError("duplicate pair_id found across shard manifests")
+    # Stable shards are hash partitions, not the canonical text-manifest order.
+    # Reuse the QC rows verbatim, consuming the lookup in input order so any
+    # remaining entries identify results from an unexpected input manifest.
+    rows: list[dict[str, Any]] = []
+    missing_pair_count = 0
+    missing_pair_sample: list[str] = []
+    for pair in iter_pairs(config.run.input_jsonl):
+        row = qc_by_id.pop(pair["pair_id"], None)
+        if row is not None:
+            rows.append(row)
+        else:
+            missing_pair_count += 1
+            if len(missing_pair_sample) < 10:
+                missing_pair_sample.append(pair["pair_id"])
+    if qc_by_id:
+        raise RuntimeError(
+            f"{len(qc_by_id)} extra pair_id values in QC manifests are absent from input; "
+            f"first extra={list(qc_by_id)[:10]}"
+        )
+    if missing_pair_count and not allow_incomplete:
+        raise RuntimeError(
+            f"{missing_pair_count} input pair_id values are missing from QC manifests; "
+            f"first missing={missing_pair_sample}"
+        )
 
     release_dir = config.run.output_dir / "manifests" / "releases"
     write_checkpoint(release_dir / "all.jsonl", rows)
@@ -960,7 +986,9 @@ def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, 
     write_checkpoint(release_dir / "accepted.jsonl", accepted)
     by_corpus = Counter(row.get("corpus", "unknown") for row in accepted)
     summary = {
-        "complete": not missing,
+        "complete": not missing and missing_pair_count == 0,
+        "release_order": "input_manifest",
+        "missing_pair_count": missing_pair_count,
         "missing_shards": missing,
         "total_pairs": len(rows),
         "accepted_pairs": len(accepted),
