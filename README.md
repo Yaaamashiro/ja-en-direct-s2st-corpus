@@ -238,7 +238,7 @@ data/
 
 全profileのrelease `all.jsonl` は `config.run.input_jsonl` の行順を保証し、`accepted.jsonl` はその順序を保った採用subsetです（途中集計も同様）。完全なreleaseでは入力とQC結果のpair_id集合一致を検査し、不足・余分・重複を拒否します。`summary.json` に `release_order: "input_manifest"` と `missing_pair_count` を記録します。
 
-**S2UT trainingには `train.jsonl` を使用します。`accepted.jsonl` は全splitのacceptedを保持する互換用ファイルで、training manifestには使用しません。** `train.jsonl`・`dev.jsonl`・`test.jsonl` はそれぞれのsplitでQC acceptedのみを含み、入力順を保ちます。test=0なら空の `test.jsonl` を生成します。summaryにはsplit別のtotal/accepted/rejected/acceptance_rate・採用音声時間を記録し、学習用時間は `train_ja_hours` / `train_en_hours` です。
+**`alignment-transfer-s2ut` の学習には、QC acceptedの全splitを入力順で保持する `accepted.jsonl` をcanonical speech manifestとして使用します。** trainerは同一manifest内にtrain/devの両方を必要とするため、`train.jsonl` 単独では使用できません。`train.jsonl`・`dev.jsonl`・`test.jsonl` は各split単体の確認・利用向けで、それぞれのsplitのQC acceptedのみを入力順で保持します。test=0なら空の `test.jsonl` を生成します。summaryにはsplit別のtotal/accepted/rejected/acceptance_rate・採用音声時間を記録し、学習用時間は `train_ja_hours` / `train_en_hours` です。
 
 統合ではランタイムのローカル一時ディスクにSQLite索引を作り、QCレコードは最大1 shard程度ずつ読み込みます。全件の辞書やlistは作りません。入力metadata・provenance・選択音声・WAV形式/SHA256/durationの既存検証も維持します。出力を `.tmp` に全て書いてから置換し、旧summaryを無効化した後、最後に新しい `summary.json` をcompletion markerとして公開します。利用側はJSONLの存在だけで完成と判断せず、summaryを確認してください。生成途中の一時索引にはinput/QC JSON相当のローカルディスク空きが必要です。
 
@@ -317,7 +317,7 @@ MyDrive/ja-en-direct-s2st-corpus/
 
 ### 結果・速度の読み方
 
-WhisperとQC閾値は従来どおり（JA CER≤0.10、EN WER≤0.10、0.7〜30秒）。Kokoroのcontent retryは0です。`[done]` はshardの処理終了を意味し、全ペア合格とは限りません。学習には `train.jsonl` を使用し、devは `dev.jsonl` で分けます。
+WhisperとQC閾値は従来どおり（JA CER≤0.10、EN WER≤0.10、0.7〜30秒）。Kokoroのcontent retryは0です。`[done]` はshardの処理終了を意味し、全ペア合格とは限りません。`alignment-transfer-s2ut` にはtrain/devを含む `accepted.jsonl` を渡し、trainerが `split` に従って学習・検証に分けます。
 
 Kokoro productionの `checkpoint_every` は初期値100で、単位はpair数ではなく**日英合計のutterance数**です。例えば50 pairs×2言語で100 utterancesです。ASR batch_size=8とは独立し、100 utteranceごと、言語の処理終了時、phase終了時、捕捉した例外時、shard終了時に保存します。ASR batchの結果はRAMに保持し、8件ごとの全checkpoint書き換えを避けます。正常checkpointのWAVのみ再利用し、checkpointにない孤立WAVは従来どおり再生成します。既存Drive設定で値が10の場合は、設定の `run.checkpoint_every` を100へ変更してください。Qwenの既存config値は維持しています。
 
