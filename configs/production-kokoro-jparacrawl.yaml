@@ -3,7 +3,7 @@ run:
   output_dir: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-jparacrawl
   num_shards: 128
   max_pairs_per_shard: 3000
-  checkpoint_every: 10
+  checkpoint_every: 100
   minimum_free_gib: 160
   minimum_cache_free_gib: 8
   maximum_output_gib: 160

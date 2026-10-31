@@ -1,5 +1,7 @@
 # JParaCrawl + Kokoro implementation report
 
+これは初回実装時の記録です。train/dev分離・I/O削減・streaming統合・層化benchmarkの後続修正は [本番前修正レポート](kokoro-scale-report.md) を参照してください。
+
 検証日：2026-10-31（JST）。実装済みですが、実JParaCrawl + T4での10/100件full smokeは未実施です。30万件の本番生成は開始していません。
 
 ## Git

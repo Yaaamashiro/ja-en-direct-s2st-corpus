@@ -18,10 +18,13 @@ def is_external(config: AppConfig) -> bool:
 
 
 def write_json(path: Path, value: dict) -> None:
+    from .io import file_size, account_replace
+    previous_bytes = file_size(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+    account_replace(path, previous_bytes)
 
 
 def validate_external(config: AppConfig) -> dict:

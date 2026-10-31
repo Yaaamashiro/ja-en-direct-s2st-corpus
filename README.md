@@ -238,6 +238,10 @@ data/
 
 全profileのrelease `all.jsonl` は `config.run.input_jsonl` の行順を保証し、`accepted.jsonl` はその順序を保った採用subsetです（途中集計も同様）。完全なreleaseでは入力とQC結果のpair_id集合一致を検査し、不足・余分・重複を拒否します。`summary.json` に `release_order: "input_manifest"` と `missing_pair_count` を記録します。
 
+**S2UT trainingには `train.jsonl` を使用します。`accepted.jsonl` は全splitのacceptedを保持する互換用ファイルで、training manifestには使用しません。** `train.jsonl`・`dev.jsonl`・`test.jsonl` はそれぞれのsplitでQC acceptedのみを含み、入力順を保ちます。test=0なら空の `test.jsonl` を生成します。summaryにはsplit別のtotal/accepted/rejected/acceptance_rate・採用音声時間を記録し、学習用時間は `train_ja_hours` / `train_en_hours` です。
+
+統合ではランタイムのローカル一時ディスクにSQLite索引を作り、QCレコードは最大1 shard程度ずつ読み込みます。全件の辞書やlistは作りません。入力metadata・provenance・選択音声・WAV形式/SHA256/durationの既存検証も維持します。出力を `.tmp` に全て書いてから置換し、旧summaryを無効化した後、最後に新しい `summary.json` をcompletion markerとして公開します。利用側はJSONLの存在だけで完成と判断せず、summaryを確認してください。生成途中の一時索引にはinput/QC JSON相当のローカルディスク空きが必要です。
+
 ## New Kokoro + JParaCrawl profile
 
 ```text
@@ -277,7 +281,7 @@ python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smo
 python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smoke-test --pairs 1000
 ```
 
-ノートブックでは `python` の代わりに専用venvの `PYTHON` を使い、設定はDrive上の `kokoro-jparacrawl-config.yaml` です。smokeはexport順の先頭N件を使い、従来の文末・長さによる選別をしません。10件・100件・1000件はそれぞれ `kokoro-smoke/pairs-N/production/` に独立して保存します。
+ノートブックでは `python` の代わりに専用venvの `PYTHON` を使い、設定はDrive上の `kokoro-jparacrawl-config.yaml` です。10件・100件smokeはexport順の先頭N件を使います。1000件benchmarkはtrainからlength-bin 0/1/2/3/4を20/150/400/330/100件ずつ、seed=42とpair_idのSHA256 rankingで選び、最後に元input順に戻します。必要件数が不足すれば停止します。`--benchmark-seed` でseedを指定できます。本文やsplitは変更しません。選択方法・seed・quota・元manifestのSHA256・選択IDは `input.selection.json` とrelease summaryに記録します。10件・100件・1000件はそれぞれ `kokoro-smoke/pairs-N/production/` に独立して保存します。以前の先頭1000件benchmarkを残している場合は新しいsmoke出力先を指定してください。
 
 ### Voiceと再現性
 
@@ -304,7 +308,7 @@ MyDrive/ja-en-direct-s2st-corpus/
     ├── manifests/qc/              # 完了したshard
     ├── failures/
     ├── reports/invocations/        # 実行単位の時間・GPU計測
-    └── manifests/releases/{accepted.jsonl,all.jsonl,summary.json}
+    └── manifests/releases/{train.jsonl,dev.jsonl,test.jsonl,accepted.jsonl,all.jsonl,summary.json}
 ```
 
 切断後はDrive mount→repo/依存/設定の復元→入力検証・GPU確認→status→run-next-shardで再開します。新規ランタイムではvenvの再作成とモデル再ロードが必要です。元のcheckpointとcanonical WAVが有効なら生成を省略し、QC未実施分から続けます。checkpointに対応しない孤立WAVは再生成します。壊れたWAV、0 byte、フォーマット・ハッシュ・duration・metadata不一致は再開時に明示的なエラーにし、黙って正常扱いしません。QCでduration落ちとして記録された音声は不合格のまま保持します。
@@ -313,7 +317,13 @@ MyDrive/ja-en-direct-s2st-corpus/
 
 ### 結果・速度の読み方
 
-WhisperとQC閾値は従来どおり（JA CER≤0.10、EN WER≤0.10、0.7〜30秒）。Kokoroのcontent retryは0です。`[done]` はshardの処理終了を意味し、全ペア合格とは限りません。学習には `accepted.jsonl` のペアを使ってください。
+WhisperとQC閾値は従来どおり（JA CER≤0.10、EN WER≤0.10、0.7〜30秒）。Kokoroのcontent retryは0です。`[done]` はshardの処理終了を意味し、全ペア合格とは限りません。学習には `train.jsonl` を使用し、devは `dev.jsonl` で分けます。
+
+Kokoro productionの `checkpoint_every` は初期値100で、単位はpair数ではなく**日英合計のutterance数**です。例えば50 pairs×2言語で100 utterancesです。ASR batch_size=8とは独立し、100 utteranceごと、言語の処理終了時、phase終了時、捕捉した例外時、shard終了時に保存します。ASR batchの結果はRAMに保持し、8件ごとの全checkpoint書き換えを避けます。正常checkpointのWAVのみ再利用し、checkpointにない孤立WAVは従来どおり再生成します。既存Drive設定で値が10の場合は、設定の `run.checkpoint_every` を100へ変更してください。Qwenの既存config値は維持しています。
+
+容量はCLIプロセス開始後、対象outputとcacheを最初に確認する際だけ全走査し、それ以降のatomic WAV/checkpoint/report置換は旧サイズとの差分を加算して上限を監視します。各shardの開始・終了で同じoutputを全走査しません。新しいCLIプロセスではbaselineを取得し直し、手動 `preflight` でも最新の容量を確認できます。この差分監視は同じ出力先に他プロセスが書き込まない前提です。
+
+summaryの `checkpoint_writes` / `checkpoint_write_seconds`、`directory_scan_count` / `directory_scan_seconds` でI/O負担を確認できます。checkpoint_writesは保存試行数です。`current_run_written_bytes` は置換を含む書き込み量で、保存サイズの純増とは異なります。duration不合格は `duration_failures_by_length_bin` と `duration_failures_by_language_and_length_bin` にutterance単位で集計します。閾値30秒は変更していません。
 
 `summary.json` は採用件数、corpus別件数、採用音声のja_hours/en_hours、入力と生成設定のprovenanceを含みます。`attempt_metrics` の各言語には全生成音声の時間・TTS推論時間・RTF・評価済み試行の平均CER/WERが入ります（平均値はcorpus全体の文字数/単語数重み付き指標ではありません）。生成失敗・空音声・duration落ち・ASR失敗も集計します。
 
@@ -329,7 +339,7 @@ python -m pytest -q
 python scripts/check_kokoro_runtime.py --device cpu
 ```
 
-実装時の実行範囲と未検証項目は [Kokoro実装レポート](docs/kokoro-implementation-report.md) を参照してください。JParaCrawl由来データの利用条件はKokoro重みのライセンスとは別です。[ATTRIBUTION.md](ATTRIBUTION.md)に公式情報を記載しています。
+実装時の実行範囲と未検証項目は [Kokoro実装レポート](docs/kokoro-implementation-report.md) と [本番前修正レポート](docs/kokoro-scale-report.md) を参照してください。JParaCrawl由来データの利用条件はKokoro重みのライセンスとは別です。[ATTRIBUTION.md](ATTRIBUTION.md)に公式情報を記載しています。
 
 ## ライセンス
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
@@ -20,8 +21,9 @@ def stable_shard(pair_id: str, num_shards: int) -> int:
     return int.from_bytes(digest[:8], "big") % num_shards
 
 
-def iter_pairs(path: Path) -> Iterator[dict[str, Any]]:
+def iter_pairs(path: Path, *, check_unique: bool = True) -> Iterator[dict[str, Any]]:
     seen: set[str] = set()
+    found = False
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -42,11 +44,13 @@ def iter_pairs(path: Path) -> Iterator[dict[str, Any]]:
             pair_id = item["pair_id"]
             if not _SAFE_ID.fullmatch(pair_id):
                 raise ValueError(f"{path}:{line_number}: unsafe pair_id={pair_id!r}")
-            if pair_id in seen:
+            if check_unique and pair_id in seen:
                 raise ValueError(f"{path}:{line_number}: duplicate pair_id={pair_id!r}")
-            seen.add(pair_id)
+            if check_unique:
+                seen.add(pair_id)
+            found = True
             yield item
-    if not seen:
+    if not found:
         raise ValueError(f"No input pairs found in {path}")
 
 
@@ -112,7 +116,13 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def write_checkpoint(path: Path, rows: list[dict[str, Any]]) -> None:
-    atomic_write_jsonl(path, rows)
+    from . import metrics
+    started = time.perf_counter()
+    try:
+        atomic_write_jsonl(path, rows)
+    finally:
+        metrics.add_time("checkpoint_write_seconds", time.perf_counter() - started)
+        metrics.add_time("checkpoint_writes", 1)
 
 
 def pcm16_storage_gib(

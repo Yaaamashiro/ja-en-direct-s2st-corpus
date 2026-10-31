@@ -41,6 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the production TTS and Whisper pipeline on five corpus pairs.",
     )
     smoke.add_argument("--pairs", type=int)
+    smoke.add_argument("--benchmark-seed", type=int, default=42)
     commands.add_parser("preflight", help="Check storage and GPU without loading models.")
     commands.add_parser("preload", help="Load pinned Kokoro and G2P, then exit.")
     voices = commands.add_parser("voice-samples", help="Audition voices using fixed sentences outside production.")
@@ -64,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from .io import reset_budgets
+    reset_budgets()
     args = build_parser().parse_args()
     config = load_config(args.config)
     if args.command in {"smoke-test", "recheck-smoke"}:
@@ -126,6 +129,7 @@ def main() -> None:
             config.smoke.input_jsonl,
             config.smoke.pair_count,
             external=is_external(config),
+            benchmark_seed=args.benchmark_seed,
         )
         smoke_config = smoke_app_config(config)
         planning = plan(smoke_config)

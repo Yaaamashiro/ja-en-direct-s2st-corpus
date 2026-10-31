@@ -170,12 +170,16 @@ data/production/
 ├── manifests/releases/
 │   ├── all.jsonl
 │   ├── accepted.jsonl
+│   ├── train.jsonl
+│   ├── dev.jsonl
+│   ├── test.jsonl
 │   └── summary.json
 └── failures/
 ```
 
-`accepted.jsonl`がS2ST学習へ使う音声対、`all.jsonl`が不合格を含む監査用、
-`summary.json`が件数・採用率・日英時間・コーパス別件数である。
+S2ST/S2UT学習には `train.jsonl`、検証には `dev.jsonl`、評価には `test.jsonl` を使用する。
+各ファイルは該当splitのQC acceptedのみを含む。`accepted.jsonl` は全splitの採用音声対を保持する互換用で、training manifestには使用しない。
+`all.jsonl` は不合格を含む監査用、`summary.json` は最後に公開するcompletion markerで、split別件数・採用率・日英時間・コーパス別件数を含む。releaseの行順は元input順を保持する。
 
 16 kHz / mono / PCM16は300時間×2言語で約64.37 GiB、再生成10%を含む
 見積りは約70.81 GiBである。native WAVは保存しない。モデルcacheとDocker

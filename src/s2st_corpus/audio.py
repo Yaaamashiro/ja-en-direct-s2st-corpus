@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 import soxr
+from .io import file_size, account_replace
 
 
 def mono_float32(waveform: np.ndarray) -> np.ndarray:
@@ -33,6 +34,7 @@ def resample_mono(
 def atomic_write_wav(
     path: Path, waveform: np.ndarray, sample_rate: int, subtype: str
 ) -> None:
+    previous_bytes = file_size(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{path.stem}.",
@@ -46,6 +48,7 @@ def atomic_write_wav(
         with temporary.open("rb+") as handle:
             os.fsync(handle.fileno())
         temporary.replace(path)
+        account_replace(path, previous_bytes)
     finally:
         temporary.unlink(missing_ok=True)
 

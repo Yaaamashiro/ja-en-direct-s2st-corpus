@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import heapq
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -8,6 +10,38 @@ from typing import Any
 from .config import AppConfig
 from .io import atomic_write_jsonl
 from .manifest import iter_pairs
+from .audio import sha256_file
+from .external import write_json, is_external
+
+
+BENCHMARK_QUOTAS = {0: 20, 1: 150, 2: 400, 3: 330, 4: 100}
+
+
+def select_benchmark_pairs(source_manifest, destination, seed=42):
+    heaps = {b: [] for b in BENCHMARK_QUOTAS}
+    for ordinal, pair in enumerate(iter_pairs(source_manifest)):
+        b = pair.get("length_bin")
+        if pair["split"] != "train" or b not in heaps:
+            continue
+        rank = int.from_bytes(hashlib.sha256(f"{seed}:{pair['pair_id']}".encode()).digest(), "big")
+        item = (-rank, pair["pair_id"], ordinal, pair)
+        heap = heaps[b]
+        if len(heap) < BENCHMARK_QUOTAS[b]:
+            heapq.heappush(heap, item)
+        elif item > heap[0]:
+            heapq.heapreplace(heap, item)
+    if any(len(heaps[b]) != n for b, n in BENCHMARK_QUOTAS.items()):
+        raise ValueError("not enough training records for benchmark length-bin quotas")
+    selected = sorted((item for heap in heaps.values() for item in heap), key=lambda item: item[2])
+    rows = [item[3] for item in selected]
+    atomic_write_jsonl(destination, rows)
+    write_json(destination.with_suffix(".selection.json"), {
+        "selection_method": "train_length_bin_sha256_ranking", "seed": seed,
+        "length_bin_quotas": BENCHMARK_QUOTAS,
+        "source_manifest_sha256": sha256_file(source_manifest),
+        "selected_pair_ids": [r["pair_id"] for r in rows],
+    })
+    return rows
 
 
 _PREFERRED_SLOTS = (
@@ -42,10 +76,13 @@ def select_smoke_pairs(
     destination: Path,
     pair_count: int,
     external: bool = False,
+    benchmark_seed: int = 42,
 ) -> list[dict[str, Any]]:
     if pair_count < 1:
         raise ValueError("pair_count must be positive")
     if external:
+        if pair_count == 1000:
+            return select_benchmark_pairs(source_manifest, destination, benchmark_seed)
         from itertools import islice
         # Export order, all splits, no sentence/length/content re-selection.
         rows = list(islice(iter_pairs(source_manifest), pair_count))
@@ -105,7 +142,7 @@ def smoke_app_config(config: AppConfig) -> AppConfig:
         output_dir=config.smoke.output_dir,
         num_shards=1,
         max_pairs_per_shard=config.smoke.pair_count,
-        checkpoint_every=1,
+        checkpoint_every=config.run.checkpoint_every if is_external(config) else 1,
         minimum_free_gib=config.smoke.minimum_free_gib,
         maximum_output_gib=config.smoke.maximum_output_gib,
         expected_hours_per_language=maximum_seconds / 3600,

@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +21,7 @@ from .audio import (
     resample_mono,
     sha256_file,
 )
-from .io import directory_size, ensure_reusable_budget
+from .io import tracked_directory_size, ensure_reusable_budget
 from .normalization import (
     japanese_reading_normalize,
     minimal_normalize,
@@ -30,7 +29,6 @@ from .normalization import (
 )
 from .config import AppConfig
 from .manifest import (
-    iter_pairs,
     pairs_for_shard,
     pcm16_storage_gib,
     plan_manifest,
@@ -375,13 +373,17 @@ def _generate_missing(
         _generate_missing_batched(config, shard_name, records, attempt, missing, checkpoint_path)
         return
     load_started = time.perf_counter()
-    if config.tts.backend == "kokoro":
-        import torch as torch_module
-        from .kokoro_backend import KokoroBackend
-        print(f"[tts] loading {config.tts.model_id}@{config.tts.revision}", flush=True)
-        model = KokoroBackend(config.tts)
-    else:
-        model, torch_module = _load_qwen(config)
+    try:
+        if config.tts.backend == "kokoro":
+            import torch as torch_module
+            from .kokoro_backend import KokoroBackend
+            print(f"[tts] loading {config.tts.model_id}@{config.tts.revision}", flush=True)
+            model = KokoroBackend(config.tts)
+        else:
+            model, torch_module = _load_qwen(config)
+    except BaseException:
+        write_checkpoint(checkpoint_path, records)
+        raise
     metrics.add_time("tts_load_seconds", time.perf_counter() - load_started)
     changed = 0
     try:
@@ -422,9 +424,30 @@ def _generate_missing(
         _release_cuda(torch_module)
 
 
+class _IntervalCheckpoint:
+    def __init__(self, config, path, records):
+        self.every = config.run.checkpoint_every
+        self.path, self.records = path, records
+        self.pending = 0
+
+    def advance(self, count=1):
+        self.pending += count
+        if self.pending >= self.every:
+            self.flush()
+
+    def flush(self):
+        write_checkpoint(self.path, self.records)
+        self.pending = 0
+
+
 def _generate_missing_batched(config, shard_name, records, attempt, missing, checkpoint_path):
-    model, torch_module = _load_qwen(config)
+    try:
+        model, torch_module = _load_qwen(config)
+    except BaseException:
+        write_checkpoint(checkpoint_path, records)
+        raise
     completed = 0
+    saver = _IntervalCheckpoint(config, checkpoint_path, records)
     try:
         for language in ("ja", "en"):
             pending = [r for r in records if (r["pair_id"], language) in missing]
@@ -442,6 +465,7 @@ def _generate_missing_batched(config, shard_name, records, attempt, missing, che
                         result.update(seed=None, seed_scope="recovered_audio")
                         record["attempts"][language].append(result)
                         completed += 1
+                        saver.advance()
                     else:
                         fresh.append(record)
                 if fresh:
@@ -470,11 +494,13 @@ def _generate_missing_batched(config, shard_name, records, attempt, missing, che
                                       tts_seconds=round(elapsed / len(fresh), 3))
                         record["attempts"][language].append(result)
                         completed += 1
-                write_checkpoint(checkpoint_path, records)
+                        saver.advance()
                 print(f"[tts-batch] {completed}/{len(missing)} {language} attempt={attempt} "
                       f"batch_size={len(fresh)}", flush=True)
-    except Exception:
-        write_checkpoint(checkpoint_path, records)
+            saver.flush()  # language boundary
+        saver.flush()  # phase boundary
+    except BaseException:
+        saver.flush()
         raise
     finally:
         del model
@@ -601,7 +627,11 @@ def _qc_unchecked(
     if config.asr.batch_size > 1:
         _qc_batched(config, records, pending, checkpoint_path, pyopenjtalk.g2p)
         return
-    transcriber, processor, model, torch_module = _load_whisper(config)
+    try:
+        transcriber, processor, model, torch_module = _load_whisper(config)
+    except BaseException:
+        write_checkpoint(checkpoint_path, records)
+        raise
     changed = 0
     try:
         for record in records:
@@ -638,16 +668,22 @@ def _qc_unchecked(
 
 def _qc_batched(config, records, pending, checkpoint_path, g2p):
     eligible = []
+    saver = _IntervalCheckpoint(config, checkpoint_path, records)
     for record, language, attempt in pending:
         if (attempt.get("generation_status") != "ok" or not
                 config.qc.min_duration_seconds <= float(attempt["duration"]) <= config.qc.max_duration_seconds):
             _evaluate_attempt(config, record, language, attempt, None, None, g2p)
+            saver.advance()
         else:
             eligible.append((record, language, attempt))
-    write_checkpoint(checkpoint_path, records)
+    saver.flush()
     if not eligible:
         return
-    transcriber, processor, model, torch_module = _load_whisper(config)
+    try:
+        transcriber, processor, model, torch_module = _load_whisper(config)
+    except BaseException:
+        saver.flush()
+        raise
     completed = len(pending) - len(eligible)
     try:
         for language in ("ja", "en"):
@@ -677,11 +713,13 @@ def _qc_batched(config, records, pending, checkpoint_path, g2p):
                         attempt.update(asr_batch_size=len(group), asr_batch_seconds=elapsed,
                                        asr_seconds=round(elapsed / len(group), 3))
                         completed += 1
-                    write_checkpoint(checkpoint_path, records)
+                        saver.advance()
                     print(f"[qc-batch] {completed}/{len(pending)} {language} batch_size={len(group)} "
                           f"seconds={elapsed}", flush=True)
-    except Exception:
-        write_checkpoint(checkpoint_path, records)
+            saver.flush()  # language boundary
+        saver.flush()  # phase boundary
+    except BaseException:
+        saver.flush()
         raise
     finally:
         del transcriber, processor, model
@@ -741,7 +779,7 @@ def _finalize_record(config: AppConfig, record: dict[str, Any]) -> dict[str, Any
 
 
 def _enforce_output_limit(config: AppConfig) -> None:
-    used_gib = directory_size(config.run.output_dir) / (1024**3)
+    used_gib = tracked_directory_size(config.run.output_dir) / (1024**3)
     if used_gib > config.run.maximum_output_gib:
         raise RuntimeError(
             f"output safety limit exceeded: {used_gib:.2f} GiB > "
@@ -933,86 +971,5 @@ def recheck_shard(config: AppConfig, shard_index: int) -> Path:
 
 
 def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, Any]:
-    provenance = ensure_identity(config) if is_external(config) else None
-    qc_by_id: dict[str, dict[str, Any]] = {}
-    missing: list[int] = []
-    for shard_index in range(config.run.num_shards):
-        name = _shard_name(shard_index, config.run.num_shards)
-        path = config.run.output_dir / "manifests" / "qc" / f"{name}.jsonl"
-        if not path.is_file():
-            missing.append(shard_index)
-            continue
-        shard_rows = list(read_jsonl(path))
-        if provenance is not None:
-            expected = pairs_for_shard(config.run.input_jsonl, shard_index, config.run.num_shards, config.run.max_pairs_per_shard)
-            validate_records(config, expected, shard_rows, provenance, complete=True)
-        for row in shard_rows:
-            pair_id = row["pair_id"]
-            if pair_id in qc_by_id:
-                raise RuntimeError("duplicate pair_id found across shard manifests")
-            qc_by_id[pair_id] = row
-    if missing and not allow_incomplete:
-        raise RuntimeError(
-            f"{len(missing)} shard manifests are missing; first missing={missing[:10]}"
-        )
-    # Stable shards are hash partitions, not the canonical text-manifest order.
-    # Reuse the QC rows verbatim, consuming the lookup in input order so any
-    # remaining entries identify results from an unexpected input manifest.
-    rows: list[dict[str, Any]] = []
-    missing_pair_count = 0
-    missing_pair_sample: list[str] = []
-    for pair in iter_pairs(config.run.input_jsonl):
-        row = qc_by_id.pop(pair["pair_id"], None)
-        if row is not None:
-            rows.append(row)
-        else:
-            missing_pair_count += 1
-            if len(missing_pair_sample) < 10:
-                missing_pair_sample.append(pair["pair_id"])
-    if qc_by_id:
-        raise RuntimeError(
-            f"{len(qc_by_id)} extra pair_id values in QC manifests are absent from input; "
-            f"first extra={list(qc_by_id)[:10]}"
-        )
-    if missing_pair_count and not allow_incomplete:
-        raise RuntimeError(
-            f"{missing_pair_count} input pair_id values are missing from QC manifests; "
-            f"first missing={missing_pair_sample}"
-        )
-
-    release_dir = config.run.output_dir / "manifests" / "releases"
-    write_checkpoint(release_dir / "all.jsonl", rows)
-    accepted = [row for row in rows if row.get("qc_status") == "accepted"]
-    write_checkpoint(release_dir / "accepted.jsonl", accepted)
-    by_corpus = Counter(row.get("corpus", "unknown") for row in accepted)
-    summary = {
-        "complete": not missing and missing_pair_count == 0,
-        "release_order": "input_manifest",
-        "missing_pair_count": missing_pair_count,
-        "missing_shards": missing,
-        "total_pairs": len(rows),
-        "accepted_pairs": len(accepted),
-        "rejected_pairs": len(rows) - len(accepted),
-        "acceptance_rate": len(accepted) / len(rows) if rows else 0.0,
-        "accepted_by_corpus": dict(sorted(by_corpus.items())),
-        "ja_hours": sum(float(row["ja_duration"]) for row in accepted) / 3600,
-        "en_hours": sum(float(row["en_duration"]) for row in accepted) / 3600,
-    }
-    summary_path = release_dir / "summary.json"
-    if provenance is not None:
-        invocations = [json.loads(p.read_text(encoding="utf-8")) for p in
-                       sorted((config.run.output_dir / "reports" / "invocations").glob("*.json"))]
-        wall = sum(r["full_pipeline_wall_seconds"] for r in invocations)
-        generated = sum(a.get("duration", 0) for r in rows for lang in ("ja", "en") for a in r["attempts"][lang])
-        summary.update(provenance=provenance, **metrics.summarize(rows), invocations=invocations,
-                       full_pipeline_wall_seconds=wall, pairs_per_second=len(rows) / wall if wall else None,
-                       generated_audio_hours_per_wall_hour=generated / wall if wall else None,
-                       timing_note="Completed invocation wall times, including model load/I/O; hard-killed invocations have no full wall measurement. Attempt RTF excludes model load and WAV writes.")
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = summary_path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(summary_path)
-    return summary
+    from .release import consolidate as publish_release
+    return publish_release(config, allow_incomplete=allow_incomplete)
