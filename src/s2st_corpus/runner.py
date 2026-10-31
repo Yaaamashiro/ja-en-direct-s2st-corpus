@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 from collections import Counter
@@ -36,6 +37,9 @@ from .manifest import (
     write_checkpoint,
 )
 from .seeding import deterministic_seed, seed_everything
+from .external import is_external, ensure_identity, validate_external, write_json
+from .integrity import validate_records
+from . import metrics
 
 
 def _shard_name(index: int, total: int) -> str:
@@ -107,6 +111,8 @@ def _materialize_hf_model(model_id: str, revision: str) -> str:
 
 
 def plan(config: AppConfig) -> dict[str, Any]:
+    if is_external(config):
+        validate_external(config)
     manifest = plan_manifest(config.run.input_jsonl, config.run.num_shards)
     estimated_audio_gib = pcm16_storage_gib(
         config.run.expected_hours_per_language,
@@ -141,6 +147,14 @@ def gpu_preflight(config: AppConfig) -> dict[str, Any]:
     )
     if config.device.require_cuda and not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the production profile")
+    if config.tts.backend == "kokoro":
+        from .kokoro_backend import resolve_device
+        resolved = resolve_device(config.tts.device, torch)
+        if config.device.require_cuda and resolved == "cpu":
+            raise RuntimeError("require_cuda profile cannot use CPU")
+        if resolved == "cpu":
+            return {"python": platform.python_version(), "torch": torch.__version__,
+                    "gpu": None, "vram_gib": 0, "tts_dtype": "float32", "device": "cpu"}
     properties = torch.cuda.get_device_properties(0)
     vram_gib = properties.total_memory / (1024**3)
     if vram_gib < config.device.minimum_vram_gib:
@@ -218,12 +232,12 @@ def _fatal_accelerator_error(error: BaseException) -> bool:
     return isinstance(error, RuntimeError) and any(marker in text for marker in markers)
 
 
-def _new_record(pair: dict[str, Any]) -> dict[str, Any]:
+def _new_record(pair: dict[str, Any], preserve_text: bool = False) -> dict[str, Any]:
     record = dict(pair)
     record.setdefault("ja_text_raw", pair["ja_text"])
     record.setdefault("en_text_raw", pair["en_text"])
-    record["ja_tts_text"] = minimal_normalize(pair["ja_text"])
-    record["en_tts_text"] = minimal_normalize(pair["en_text"])
+    record["ja_tts_text"] = pair["ja_text"] if preserve_text else minimal_normalize(pair["ja_text"])
+    record["en_tts_text"] = pair["en_text"] if preserve_text else minimal_normalize(pair["en_text"])
     record["attempts"] = {"ja": [], "en": []}
     return record
 
@@ -268,9 +282,16 @@ def _generate_attempt(
     )
     seed = deterministic_seed(record["pair_id"], language, attempt)
     started = time.perf_counter()
+    synthesis_seconds = 0.0
     try:
-        if not (config.run.resume and _valid_existing(canonical_path, config)):
-            if generated is None:
+        # External-profile WAVs are reused only through verified checkpoints.
+        # A WAV without its checkpoint is an orphan and is regenerated atomically.
+        if is_external(config) or not (config.run.resume and _valid_existing(canonical_path, config)):
+            synthesis_started = time.perf_counter()
+            if generated is None and config.tts.backend == "kokoro":
+                waveform, sample_rate = model.generate(record[f"{language}_tts_text"], language)
+                waveforms = [waveform]
+            elif generated is None:
                 seed_everything(seed, torch_module)
                 waveforms, sample_rate = model.generate_custom_voice(
                     text=record[f"{language}_tts_text"],
@@ -286,7 +307,10 @@ def _generate_attempt(
             else:
                 waveform, sample_rate = generated
                 waveforms = [waveform]
+            synthesis_seconds = time.perf_counter() - synthesis_started
             waveform = mono_float32(np.asarray(waveforms[0]))
+            if not waveform.size:
+                raise ValueError("empty_audio: no audio samples")
             canonical = resample_mono(
                 waveform, int(sample_rate), config.tts.output_sample_rate
             )
@@ -307,10 +331,13 @@ def _generate_attempt(
             "duration": duration_seconds(canonical_path),
             "sha256": sha256_file(canonical_path),
             "tts_seconds": round(time.perf_counter() - started, 3),
+            "synthesis_seconds": synthesis_seconds,
         }
     except Exception as error:
         if _fatal_accelerator_error(error):
             raise
+        if config.tts.backend == "kokoro" and synthesis_seconds == 0:
+            synthesis_seconds = time.perf_counter() - started
         return {
             "attempt": attempt,
             "seed": seed,
@@ -319,6 +346,7 @@ def _generate_attempt(
             "wav_native": str(native_path) if native_path is not None else None,
             "wav_16k": str(canonical_path),
             "tts_seconds": round(time.perf_counter() - started, 3),
+            "synthesis_seconds": synthesis_seconds,
         }
 
 
@@ -345,7 +373,15 @@ def _generate_missing(
     if config.tts.batch_size > 1:
         _generate_missing_batched(config, shard_name, records, attempt, missing, checkpoint_path)
         return
-    model, torch_module = _load_qwen(config)
+    load_started = time.perf_counter()
+    if config.tts.backend == "kokoro":
+        import torch as torch_module
+        from .kokoro_backend import KokoroBackend
+        print(f"[tts] loading {config.tts.model_id}@{config.tts.revision}", flush=True)
+        model = KokoroBackend(config.tts)
+    else:
+        model, torch_module = _load_qwen(config)
+    metrics.add_time("tts_load_seconds", time.perf_counter() - load_started)
     changed = 0
     try:
         for record in records:
@@ -376,6 +412,10 @@ def _generate_missing(
                 if changed % config.run.checkpoint_every == 0:
                     write_checkpoint(checkpoint_path, records)
         write_checkpoint(checkpoint_path, records)
+    except BaseException:
+        if is_external(config):
+            write_checkpoint(checkpoint_path, records)
+        raise
     finally:
         del model
         _release_cuda(torch_module)
@@ -444,8 +484,13 @@ def _load_whisper(config: AppConfig) -> tuple[Any, Any, Any, Any]:
     import torch
     from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
+    started = time.perf_counter()
     print(f"[asr] loading {config.asr.model_id}@{config.asr.revision}")
-    dtype = _dtype(torch, config.asr.dtype)
+    device = "cuda:0"
+    if config.tts.backend == "kokoro":
+        from .kokoro_backend import resolve_device
+        device = resolve_device(config.tts.device, torch)
+    dtype = torch.float32 if device == "cpu" else _dtype(torch, config.asr.dtype)
     model = AutoModelForSpeechSeq2Seq.from_pretrained(
         config.asr.model_id,
         revision=config.asr.revision,
@@ -453,7 +498,7 @@ def _load_whisper(config: AppConfig) -> tuple[Any, Any, Any, Any]:
         low_cpu_mem_usage=True,
         use_safetensors=True,
         attn_implementation=config.asr.attention,
-    ).to("cuda:0")
+    ).to(device)
     processor = AutoProcessor.from_pretrained(
         config.asr.model_id,
         revision=config.asr.revision,
@@ -464,8 +509,9 @@ def _load_whisper(config: AppConfig) -> tuple[Any, Any, Any, Any]:
         tokenizer=processor.tokenizer,
         feature_extractor=processor.feature_extractor,
         dtype=dtype,
-        device=0,
+        device=0 if device != "cpu" else -1,
     )
+    metrics.add_time("asr_load_seconds", time.perf_counter() - started)
     return transcriber, processor, model, torch
 
 
@@ -676,7 +722,8 @@ def _finalize_record(config: AppConfig, record: dict[str, Any]) -> dict[str, Any
         {
             "tts_model_id": config.tts.model_id,
             "tts_model_revision": config.tts.revision,
-            "tts_speaker_id": config.tts.speaker,
+            "tts_speaker_id": getattr(config.tts, "speaker", None),
+            "tts_backend": config.tts.backend,
             "tts_dtype": (
                 str(_dtype(__import__("torch"), config.tts.dtype))
                 .removeprefix("torch.")
@@ -685,6 +732,10 @@ def _finalize_record(config: AppConfig, record: dict[str, Any]) -> dict[str, Any
             "qc_asr_model_revision": config.asr.revision,
         }
     )
+    if config.tts.backend == "kokoro":
+        record.update(ja_voice=config.tts.ja_voice, en_voice=config.tts.en_voice,
+                      tts_speed=config.tts.speed, native_sample_rate=24000,
+                      canonical_sample_rate=16000, kokoro_package_version=config.tts.package_version)
     return record
 
 
@@ -698,6 +749,44 @@ def _enforce_output_limit(config: AppConfig) -> None:
 
 
 def run_shard(config: AppConfig, shard_index: int) -> Path:
+    if not is_external(config):
+        return _run_shard(config, shard_index)
+    started = time.perf_counter()
+    provenance = ensure_identity(config)
+    if not config.run.resume:
+        raise ValueError("external runs require resume=true; use a new output_dir for fresh generation")
+    measurements = {"started_utc": datetime.now(timezone.utc).isoformat(), "shard": shard_index}
+    try:
+        repository = Path(__file__).resolve().parents[2]
+        measurements["implementation_commit"] = subprocess.check_output(
+            ["git", "-c", f"safe.directory={repository.as_posix()}", "rev-parse", "HEAD"],
+            cwd=repository, text=True, stderr=subprocess.DEVNULL, timeout=5).strip()
+    except (OSError, subprocess.SubprocessError):
+        measurements["implementation_commit"] = None
+    token = metrics.ACTIVE.set(measurements)
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    try:
+        result = _run_shard(config, shard_index, provenance)
+        measurements["success"] = True
+        return result
+    finally:
+        metrics.ACTIVE.reset(token)
+        measurements["full_pipeline_wall_seconds"] = time.perf_counter() - started
+        measurements.setdefault("success", False)
+        measurements["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        measurements["peak_vram_gib"] = torch.cuda.max_memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+        checkpoint = config.run.output_dir / "manifests" / "generated" / f"{_shard_name(shard_index, config.run.num_shards)}.jsonl"
+        if checkpoint.is_file():
+            measurements["checkpoint_metrics"] = metrics.summarize(list(read_jsonl(checkpoint)))
+        name = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        write_json(config.run.output_dir / "reports" / "invocations" / f"{name}.json", measurements)
+
+
+def _run_shard(config: AppConfig, shard_index: int, provenance=None) -> Path:
+    if not 0 <= shard_index < config.run.num_shards:
+        raise ValueError("shard index outside configured range")
     hardware = gpu_preflight(config)
     _enforce_output_limit(config)
     shard_name = _shard_name(shard_index, config.run.num_shards)
@@ -705,6 +794,9 @@ def run_shard(config: AppConfig, shard_index: int) -> Path:
         config.run.output_dir / "manifests" / "qc" / f"{shard_name}.jsonl"
     )
     if config.run.resume and final_path.is_file():
+        if provenance is not None:
+            expected = pairs_for_shard(config.run.input_jsonl, shard_index, config.run.num_shards, config.run.max_pairs_per_shard)
+            validate_records(config, expected, read_jsonl(final_path), provenance, complete=True)
         print(f"[resume] completed shard found: {final_path}")
         return final_path
 
@@ -720,8 +812,14 @@ def run_shard(config: AppConfig, shard_index: int) -> Path:
         / "generated"
         / f"{shard_name}.jsonl"
     )
-    prior = {row["pair_id"]: row for row in read_jsonl(checkpoint)}
-    records = [prior.get(pair["pair_id"], _new_record(pair)) for pair in pairs]
+    previous = list(read_jsonl(checkpoint))
+    if provenance is not None:
+        validate_records(config, pairs, previous, provenance)
+    prior = {row["pair_id"]: row for row in previous}
+    records = [prior.get(pair["pair_id"], _new_record(pair, preserve_text=is_external(config))) for pair in pairs]
+    if provenance is not None:
+        for record in records:
+            record["provenance"] = provenance
     print(
         "[preflight] "
         + json.dumps(
@@ -744,10 +842,14 @@ def run_shard(config: AppConfig, shard_index: int) -> Path:
         for record in records
         for language in ("ja", "en")
     }
+    phase_started = time.perf_counter()
     _generate_missing(
         config, shard_name, records, 0, initial_targets, checkpoint
     )
+    metrics.add_time("tts_phase_seconds", time.perf_counter() - phase_started)
+    phase_started = time.perf_counter()
     _qc_unchecked(config, records, 0, checkpoint)
+    metrics.add_time("asr_phase_seconds", time.perf_counter() - phase_started)
 
     if config.tts.max_content_retries:
         retry_targets = {
@@ -790,6 +892,10 @@ def recheck_shard(config: AppConfig, shard_index: int) -> Path:
     if not final_path.is_file():
         raise FileNotFoundError(f"Completed QC manifest required: {final_path}")
     records = list(read_jsonl(final_path))
+    if is_external(config):
+        provenance = ensure_identity(config)
+        pairs = pairs_for_shard(config.run.input_jsonl, shard_index, config.run.num_shards, config.run.max_pairs_per_shard)
+        validate_records(config, pairs, records, provenance, complete=True)
     if not records:
         raise ValueError("No saved records to recheck")
     for record in records:
@@ -826,6 +932,7 @@ def recheck_shard(config: AppConfig, shard_index: int) -> Path:
 
 
 def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, Any]:
+    provenance = ensure_identity(config) if is_external(config) else None
     rows: list[dict[str, Any]] = []
     missing: list[int] = []
     for shard_index in range(config.run.num_shards):
@@ -834,7 +941,11 @@ def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, 
         if not path.is_file():
             missing.append(shard_index)
             continue
-        rows.extend(read_jsonl(path))
+        shard_rows = list(read_jsonl(path))
+        if provenance is not None:
+            expected = pairs_for_shard(config.run.input_jsonl, shard_index, config.run.num_shards, config.run.max_pairs_per_shard)
+            validate_records(config, expected, shard_rows, provenance, complete=True)
+        rows.extend(shard_rows)
     if missing and not allow_incomplete:
         raise RuntimeError(
             f"{len(missing)} shard manifests are missing; first missing={missing[:10]}"
@@ -860,6 +971,15 @@ def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, 
         "en_hours": sum(float(row["en_duration"]) for row in accepted) / 3600,
     }
     summary_path = release_dir / "summary.json"
+    if provenance is not None:
+        invocations = [json.loads(p.read_text(encoding="utf-8")) for p in
+                       sorted((config.run.output_dir / "reports" / "invocations").glob("*.json"))]
+        wall = sum(r["full_pipeline_wall_seconds"] for r in invocations)
+        generated = sum(a.get("duration", 0) for r in rows for lang in ("ja", "en") for a in r["attempts"][lang])
+        summary.update(provenance=provenance, **metrics.summarize(rows), invocations=invocations,
+                       full_pipeline_wall_seconds=wall, pairs_per_second=len(rows) / wall if wall else None,
+                       generated_audio_hours_per_wall_hour=generated / wall if wall else None,
+                       timing_note="Completed invocation wall times, including model load/I/O; hard-killed invocations have no full wall measurement. Attempt RTF excludes model load and WAV writes.")
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = summary_path.with_suffix(".json.tmp")
     temporary.write_text(

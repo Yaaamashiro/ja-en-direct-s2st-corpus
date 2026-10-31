@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from .config import load_config
 from .corpora import prepare_corpora
 from .runner import consolidate, plan, recheck_shard, run_shard
 from .smoke import select_smoke_pairs, smoke_app_config
+from .external import is_external, validate_external, ensure_identity
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,12 +36,20 @@ def build_parser() -> argparse.ArgumentParser:
         "build",
         help="Run the complete resumable pipeline from downloads to release.",
     )
-    commands.add_parser(
+    smoke = commands.add_parser(
         "smoke-test",
         help="Run the production TTS and Whisper pipeline on five corpus pairs.",
     )
+    smoke.add_argument("--pairs", type=int)
+    commands.add_parser("preflight", help="Check storage and GPU without loading models.")
+    commands.add_parser("preload", help="Load pinned Kokoro and G2P, then exit.")
+    voices = commands.add_parser("voice-samples", help="Audition voices using fixed sentences outside production.")
+    voices.add_argument("--output-dir", type=Path, required=True)
+    voices.add_argument("--en-voices", nargs="+", default=["af_heart", "af_bella", "am_adam"])
+    parser.add_argument("--allow-production", action="store_true", help="Explicitly enable external-profile production, after reviewing smoke results.")
     commands.add_parser("plan", help="Validate the input manifest and estimate storage.")
-    commands.add_parser("recheck-smoke", help="Recheck saved smoke audio without TTS; back up old reports.")
+    recheck = commands.add_parser("recheck-smoke", help="Recheck saved smoke audio without TTS; back up old reports.")
+    recheck.add_argument("--pairs", type=int)
     shard = commands.add_parser("run-shard", help="Synthesize and QC one stable shard.")
     shard.add_argument("--shard-index", type=int, required=True)
     commands.add_parser(
@@ -56,7 +66,34 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     config = load_config(args.config)
-    if args.command == "prepare":
+    if args.command in {"smoke-test", "recheck-smoke"}:
+        count = args.pairs if args.pairs is not None else config.smoke.pair_count
+        if not 1 <= count <= 1000:
+            raise ValueError("smoke --pairs must be between 1 and 1000")
+        if is_external(config) or args.pairs is not None:
+            root = config.smoke.output_dir / f"pairs-{count}"
+            config = replace(config, smoke=replace(config.smoke, pair_count=count,
+                input_jsonl=root / "input.jsonl", output_dir=root / "production"))
+    if is_external(config) and args.command in {"build", "run-shard", "run-next-shard", "run-remaining-shards"} and not args.allow_production:
+        raise RuntimeError("Review 10/100-pair smoke reports first; production requires --allow-production before the command")
+    if args.command == "preflight":
+        from .runner import gpu_preflight
+        result = gpu_preflight(config)
+    elif args.command == "preload":
+        if config.tts.backend != "kokoro":
+            raise ValueError("preload command is for Kokoro")
+        from .kokoro_backend import KokoroBackend
+        backend = KokoroBackend(config.tts)
+        result = {"model": config.tts.model_id, "revision": config.tts.revision,
+                  "device": backend.device, "load_seconds": backend.load_seconds}
+    elif args.command == "voice-samples":
+        if config.tts.backend != "kokoro":
+            raise ValueError("voice-samples command is for Kokoro")
+        if args.output_dir.resolve().is_relative_to(config.run.output_dir.resolve()):
+            raise ValueError("voice samples must be outside production output_dir")
+        from .kokoro_backend import voice_samples
+        result = voice_samples(config, args.output_dir, args.en_voices)
+    elif args.command == "prepare":
         result = prepare_corpora(config)
     elif args.command == "build":
         preparation = prepare_corpora(config)
@@ -88,6 +125,7 @@ def main() -> None:
             config.run.input_jsonl,
             config.smoke.input_jsonl,
             config.smoke.pair_count,
+            external=is_external(config),
         )
         smoke_config = smoke_app_config(config)
         planning = plan(smoke_config)
@@ -118,11 +156,25 @@ def main() -> None:
     elif args.command == "run-shard":
         result = {"manifest": str(run_shard(config, args.shard_index))}
     elif args.command in {"run-next-shard", "run-remaining-shards", "status"}:
+        provenance = None
+        if is_external(config):
+            validate_external(config)
+            if (config.run.output_dir / "provenance.json").exists():
+                provenance = ensure_identity(config)
         completed = []
         remaining = []
         for index in range(config.run.num_shards):
             name = f"shard-{index:05d}-of-{config.run.num_shards:05d}.jsonl"
             path = config.run.output_dir / "manifests" / "qc" / name
+            if path.is_file() and is_external(config):
+                if provenance is None:
+                    raise RuntimeError("completed output has no provenance")
+                # Status checks metadata; run_shard/consolidate additionally verify every WAV.
+                from .manifest import read_jsonl, pairs_for_shard
+                rows = list(read_jsonl(path))
+                expected = pairs_for_shard(config.run.input_jsonl, index, config.run.num_shards, config.run.max_pairs_per_shard)
+                if {r["pair_id"] for r in rows} != {r["pair_id"] for r in expected} or any(r.get("provenance") != provenance for r in rows):
+                    raise RuntimeError(f"invalid completed shard: {path}")
             (completed if path.is_file() else remaining).append(index)
         result = {
             "completed_shards": len(completed),

@@ -647,6 +647,9 @@ def _reuse_summary(config: AppConfig) -> dict[str, Any] | None:
 
 
 def prepare_corpora(config: AppConfig) -> dict[str, Any]:
+    from .external import is_external, validate_external
+    if is_external(config):
+        return validate_external(config)
     reused = _reuse_summary(config)
     if reused is not None:
         print(f"[resume] prepared manifest found: {config.run.input_jsonl}")

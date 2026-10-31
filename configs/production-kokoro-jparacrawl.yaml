@@ -1,0 +1,61 @@
+run:
+  input_jsonl: /content/drive/MyDrive/jparacrawl-filtering/outputs/text-corpus/manifest.jsonl
+  output_dir: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-jparacrawl
+  num_shards: 128
+  max_pairs_per_shard: 3000
+  checkpoint_every: 10
+  minimum_free_gib: 160
+  minimum_cache_free_gib: 8
+  maximum_output_gib: 160
+  expected_hours_per_language: 300
+  retry_storage_fraction: 0
+  save_native: false
+  resume: true
+prepare:
+  mode: external_manifest
+  manifest: /content/drive/MyDrive/jparacrawl-filtering/outputs/text-corpus/manifest.jsonl
+  summary: /content/drive/MyDrive/jparacrawl-filtering/outputs/text-corpus/summary.json
+  expected_total_pairs: 300000
+  expected_train_pairs: 298000
+  expected_dev_pairs: 2000
+  expected_test_pairs: 0
+  expected_corpus: jparacrawl_v3_filtered
+smoke:
+  input_jsonl: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-smoke/input.jsonl
+  output_dir: /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-smoke
+  pair_count: 10
+  minimum_free_gib: 2
+  maximum_output_gib: 2
+device:
+  require_cuda: true
+  minimum_vram_gib: 4
+  require_bf16: false
+  attention: sdpa
+tts:
+  backend: kokoro
+  model_id: hexgrad/Kokoro-82M
+  revision: f3ff3571791e39611d31c381e3a41a3af07b4987
+  package_version: 0.9.4
+  device: cuda
+  dtype: float32
+  ja_voice: jf_alpha
+  en_voice: af_heart
+  speed: 1.0
+  native_sample_rate: 24000
+  output_sample_rate: 16000
+  max_content_retries: 0
+  batch_size: 1
+asr:
+  model_id: openai/whisper-large-v3-turbo
+  revision: 60be3615a4d667e1258e8ad29130467587c489aa
+  dtype: float16
+  attention: sdpa
+  do_sample: false
+  num_beams: 1
+  condition_on_prev_tokens: false
+  batch_size: 8
+qc:
+  max_ja_cer: 0.10
+  max_en_wer: 0.10
+  min_duration_seconds: 0.7
+  max_duration_seconds: 30.0

@@ -1,5 +1,16 @@
 # Japanese-to-English Direct S2ST corpus
 
+このリポジトリには2つの独立したprofileがあります。
+
+| Profile | 入力 | TTS | Colab |
+| --- | --- | --- | --- |
+| Legacy / original | JESC・KFTT | Qwen3-TTS / Ono_Anna | `notebooks/colab_pro.ipynb` |
+| New Kokoro + JParaCrawl | 検証済みtext corpus export | Kokoro-82M / jf_alpha・af_heart | [専用ノートブック](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/feature/kokoro-tts/notebooks/colab_kokoro_jparacrawl.ipynb) |
+
+Kokoro版は `feature/kokoro-tts` ブランチです。[新profileの手順](#new-kokoro--jparacrawl-profile)を参照してください。以下の従来手順はQwen用です。
+
+## Legacy / original profile
+
 公式JESC・KFTTから、同一話者の日英合成音声ペアを作成します。
 
 - 学習用テキスト：Filtered JESC 70% + KFTT 30%（推定日本語音声時間比）
@@ -224,6 +235,99 @@ data/
 ```
 
 公式配布物、生成音声、モデルcacheはGitへ入りません。データの出典と利用条件は[ATTRIBUTION.md](ATTRIBUTION.md)、詳しい再開・個別実行方法は[production-runbook.md](docs/production-runbook.md)を参照してください。
+
+## New Kokoro + JParaCrawl profile
+
+```text
+JParaCrawl v3 → jparacrawl-filtering → text corpus export
+→ Kokoro-82M (native 24 kHz) → 16 kHz / mono / PCM16 WAV → Whisper QC
+```
+
+フィルタリング・重複除去・30万件選択・train/dev分割は `jparacrawl-filtering` 側で完結させます。そちらの `scripts/export_text_corpus.py` が出力した `manifest.jsonl` と `summary.json` だけを読みます。rawデータや `selected.parquet` は読みません。
+
+`configs/production-kokoro-jparacrawl.yaml` は既定で次の2ファイルを検証します。
+
+```text
+/content/drive/MyDrive/jparacrawl-filtering/outputs/text-corpus/manifest.jsonl
+/content/drive/MyDrive/jparacrawl-filtering/outputs/text-corpus/summary.json
+```
+
+検査内容はsummaryのcomplete・corpus・件数、実ファイルのSHA256、全recordのID重複・空テキスト・split・corpus・length_binです。期待値はconfigで変更できます（既定 total=300000 / train=298000 / dev=2000 / test=0）。全本文を巨大listにせず検証します。検証時にレコードを除外・並べ替え・修正しません。export文字列をそのまま公式KPipelineへ渡します。モデル内部のG2P処理やQC用の評価正規化とは区別してください。
+
+### Colabの手順
+
+専用ノートブックを上から実行します。T4を対象にCUDA必須・BF16不要にしており、T4の実測結果はsmokeで確認してください。Kokoro float32とWhisper float16を順番にロードするため、同時に両モデルでVRAMを埋める実装ではありません。Kokoroは1文ずつ生成し、ASRは既定8件バッチです。Qwen用の `S2ST_TTS_BATCH_SIZE` を引き継ぐと停止します。
+
+1. Driveをmountし、専用checkoutで `feature/kokoro-tts` を取得します。
+2. Python 3.12の専用venvにTorch 2.7.1/cu126と固定依存を導入します。Colab本体のPythonには依存しません。`espeak-ng` とUniDic `3.1.0+2021-08-31` の辞書本体も導入します。
+3. Driveに保存する設定を作成・復元し、入力2ファイルを確認します。
+4. 入力検証→GPU/容量確認→preload→任意のvoice試聴を実行します。
+5. **10件→100件のfull TTS＋Whisper QC**を実行し、ここで結果を確認します。1000件benchmarkは既定で無効です。
+6. 結果を確認して本番を実行する場合だけ、`APPROVE_PRODUCTION=True` にします。最初は次の1 shardです。全件実行にはさらに `RUN_ALL_REMAINING=True` が必要です。
+
+本番は自動では開始しません。CLIもexternal profileの生成コマンドには `--allow-production` が必要です。
+
+```bash
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml prepare
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smoke-test --pairs 10
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smoke-test --pairs 100
+# 任意のbenchmark（結果を見てから）
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smoke-test --pairs 1000
+```
+
+ノートブックでは `python` の代わりに専用venvの `PYTHON` を使い、設定はDrive上の `kokoro-jparacrawl-config.yaml` です。smokeはexport順の先頭N件を使い、従来の文末・長さによる選別をしません。10件・100件・1000件はそれぞれ `kokoro-smoke/pairs-N/production/` に独立して保存します。
+
+### Voiceと再現性
+
+既定は日本語 `jf_alpha`、英語 `af_heart`、speed=1.0。日英で同一人物を表す設定ではありません。公式 `kokoro==0.9.4` とモデルrevision `f3ff3571791e39611d31c381e3a41a3af07b4987` を固定しています。voice tensorも同じrevisionから取得します。1つのKModelを日英KPipelineで共有し、空チャンクを除く全チャンクを順番に連結します。全チャンクが空ならgeneration failureです。
+
+```bash
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml voice-samples --output-dir /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-voice-samples --en-voices af_heart af_bella am_adam
+```
+
+日本語はjf_alpha・jf_gongitsune・jf_nezumi・jf_tebukuro・jm_kumoを固定文で試聴できます。試聴は本番データとは別です。configのvoiceを確定してからsmokeを開始してください。同じ出力先でvoice・speed・モデル・入力・QC等を変更すると `provenance mismatch` で停止します。設定を元に戻すか、新しい出力先を指定してください。
+
+### 保存先と再開
+
+```text
+MyDrive/ja-en-direct-s2st-corpus/
+├── kokoro-jparacrawl-config.yaml
+├── kokoro-logs/                    # リアルタイム実行ログ
+├── kokoro-environment/             # pip freezeと実装commit
+├── kokoro-smoke/pairs-{10,100,1000}/production/
+└── kokoro-jparacrawl/              # 本番（Qwenとは別）
+    ├── provenance.json
+    ├── audio/16k/{ja,en}/shard-.../*.a0.wav
+    ├── manifests/generated/       # 途中checkpoint
+    ├── manifests/qc/              # 完了したshard
+    ├── failures/
+    ├── reports/invocations/        # 実行単位の時間・GPU計測
+    └── manifests/releases/{accepted.jsonl,all.jsonl,summary.json}
+```
+
+切断後はDrive mount→repo/依存/設定の復元→入力検証・GPU確認→status→run-next-shardで再開します。新規ランタイムではvenvの再作成とモデル再ロードが必要です。元のcheckpointとcanonical WAVが有効なら生成を省略し、QC未実施分から続けます。checkpointに対応しない孤立WAVは再生成します。壊れたWAV、0 byte、フォーマット・ハッシュ・duration・metadata不一致は再開時に明示的なエラーにし、黙って正常扱いしません。QCでduration落ちとして記録された音声は不合格のまま保持します。
+
+`status` は完了manifestのID・provenanceを検査します。`run-shard` の再開と `consolidate` はWAVの実体も検査します。**同じ出力先を複数プロセスから同時実行しないでください。** 既定でnative 24 kHz音声は保存しません。必要なdebug runだけ `save_native: true` と別出力先を使えます。
+
+### 結果・速度の読み方
+
+WhisperとQC閾値は従来どおり（JA CER≤0.10、EN WER≤0.10、0.7〜30秒）。Kokoroのcontent retryは0です。`[done]` はshardの処理終了を意味し、全ペア合格とは限りません。学習には `accepted.jsonl` のペアを使ってください。
+
+`summary.json` は採用件数、corpus別件数、採用音声のja_hours/en_hours、入力と生成設定のprovenanceを含みます。`attempt_metrics` の各言語には全生成音声の時間・TTS推論時間・RTF・評価済み試行の平均CER/WERが入ります（平均値はcorpus全体の文字数/単語数重み付き指標ではありません）。生成失敗・空音声・duration落ち・ASR失敗も集計します。
+
+RTF = TTS推論wall秒 / 生成音声秒。モデルload・WAV変換/保存はRTFから除き、`invocations` の `tts_load_seconds`、`asr_load_seconds`、各phase時間、`full_pipeline_wall_seconds` で別に確認します。GPUとPyTorchのpeak allocated VRAMも実行単位で保存します。pairs/secと音声時間/wall時間は成功・失敗した保存済みinvocationの累積wall時間を使います。**強制切断でfinallyまで実行されなかったinvocationはwall計測が残らず、速度が過大に見えることがあります。CU見積もりには切断なしの新しいbenchmarkを使ってください。** 実行ログのCU差分とwall時間から消費率を計算し、RTFだけからCUを断定しないでください。
+
+本番完了後の `consolidate` は全shardと音声の整合性を確認します。`complete: true` / `missing_shards: []` を確認してください。途中集計だけなら `consolidate --allow-incomplete` を明示します。
+
+### 検証
+
+```bash
+python -m pytest -q
+# 固定文の日英TTS単体チェック（入力exportもWhisperも使わない）
+python scripts/check_kokoro_runtime.py --device cpu
+```
+
+実装時の実行範囲と未検証項目は [Kokoro実装レポート](docs/kokoro-implementation-report.md) を参照してください。JParaCrawl由来データの利用条件はKokoro重みのライセンスとは別です。[ATTRIBUTION.md](ATTRIBUTION.md)に公式情報を記載しています。
 
 ## ライセンス
 

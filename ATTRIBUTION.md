@@ -53,7 +53,24 @@ JESC・KFTTの配布物、生成音声、Qwen3-TTS・Whisperのモデル重み�
 }
 ```
 
+### JParaCrawl v3（external manifest profileの入力）
+
+- 提供元：NTT。English–Japanese v3.0を外部リポジトリで選別・exportしたテキストを使用。
+- 公式情報・利用規約：[JParaCrawl](https://www.kecl.ntt.co.jp/icl/lirg/jparacrawl/)
+- 同ページの「対訳データ，単言語データおよび学習済みモデル利用に関する利用規約」は、情報解析を伴う研究開発目的の利用を定め、派生データにも同条件を適用しています。掲載条件では商用利用は認められておらず、商用利用は提供元への問い合わせが案内されています。CC BY等と推測して表記しないでください。
+- 論文：[JParaCrawl v3.0: A Large-scale English-Japanese Parallel Corpus](https://aclanthology.org/2022.lrec-1.721/)（Makoto Morishita, Katsuki Chousa, Jun Suzuki, Masaaki Nagata; 2022）。
+- 本リポジトリの処理：export検証、TTS音声化、16 kHzへのリサンプリング、ASR品質検査。再フィルタリング・再ランキングはしません。元のcorpus/split/length_bin等とexportファイルのSHA256を保持します。
+
 ## Models
+
+### Kokoro-82M
+
+- 提供者：hexgrad。モデル `hexgrad/Kokoro-82M`、v1.0。
+- 固定revision：`f3ff3571791e39611d31c381e3a41a3af07b4987`。
+- 重みのライセンス：Apache License 2.0（[固定revisionのモデルカード](https://huggingface.co/hexgrad/Kokoro-82M/blob/f3ff3571791e39611d31c381e3a41a3af07b4987/README.md)）。
+- 公式ランタイム：[hexgrad/kokoro](https://github.com/hexgrad/kokoro)、使用package `kokoro==0.9.4`。
+- 日英G2P：[hexgrad/misaki](https://github.com/hexgrad/misaki)、使用package `misaki==0.9.4`。UniDic・pyopenjtalk・eSpeak NG等の依存資源にもそれぞれの利用条件があります。
+- モデルのライセンスを、入力のJParaCrawlテキストやその派生コーパス全体に一括適用しません。重みや依存資源はGitに収録しません。
 
 ### Qwen3-TTS
 

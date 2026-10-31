@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,18 @@ class PrepareConfig:
     long_time_fraction: float
     include_dev: bool
     include_test: bool
+
+
+@dataclass(frozen=True)
+class ExternalPrepareConfig:
+    manifest: Path
+    summary: Path
+    expected_total_pairs: int
+    expected_train_pairs: int
+    expected_dev_pairs: int
+    expected_test_pairs: int
+    expected_corpus: str
+    mode: str = "external_manifest"
 
 
 @dataclass(frozen=True)
@@ -85,6 +99,24 @@ class TTSConfig:
     output_sample_rate: int
     max_content_retries: int
     batch_size: int = 1
+    backend: str = "qwen"
+
+
+@dataclass(frozen=True)
+class KokoroConfig:
+    model_id: str
+    revision: str
+    device: str
+    ja_voice: str
+    en_voice: str
+    speed: float
+    native_sample_rate: int = 24000
+    output_sample_rate: int = 16000
+    max_content_retries: int = 0
+    batch_size: int = 1
+    backend: str = "kokoro"
+    dtype: str = "float32"
+    package_version: str = "0.9.4"
 
 
 @dataclass(frozen=True)
@@ -110,11 +142,11 @@ class QCConfig:
 @dataclass(frozen=True)
 class AppConfig:
     run: RunConfig
-    prepare: PrepareConfig
+    prepare: PrepareConfig | ExternalPrepareConfig
     sources: dict[str, CorpusSourceConfig]
     smoke: SmokeConfig
     device: DeviceConfig
-    tts: TTSConfig
+    tts: TTSConfig | KokoroConfig
     asr: ASRConfig
     qc: QCConfig
 
@@ -138,10 +170,14 @@ def load_config(path: Path) -> AppConfig:
     run_values["output_dir"] = _path(run_values["output_dir"])
     run = RunConfig(**run_values)
     prepare_values = _mapping(raw.get("prepare"), "prepare").copy()
-    for key in ("sources_dir", "work_dir", "reports_dir"):
+    mode = prepare_values.pop("mode", "jesc_kftt")
+    if mode not in {"jesc_kftt", "external_manifest"}:
+        raise ValueError(f"unknown prepare.mode: {mode}")
+    external = mode == "external_manifest"
+    for key in (("manifest", "summary") if external else ("sources_dir", "work_dir", "reports_dir")):
         prepare_values[key] = _path(prepare_values[key])
-    prepare = PrepareConfig(**prepare_values)
-    source_values = _mapping(raw.get("sources"), "sources")
+    prepare = (ExternalPrepareConfig if external else PrepareConfig)(**prepare_values)
+    source_values = _mapping(raw.get("sources", {}), "sources")
     sources = {
         name: CorpusSourceConfig(**_mapping(values, f"sources.{name}"))
         for name, values in source_values.items()
@@ -156,7 +192,10 @@ def load_config(path: Path) -> AppConfig:
     for values, name in ((tts_values, "S2ST_TTS_BATCH_SIZE"), (asr_values, "S2ST_ASR_BATCH_SIZE")):
         if name in os.environ:
             values["batch_size"] = int(os.environ[name])
-    tts = TTSConfig(**tts_values)
+    backend = tts_values.get("backend", "qwen")
+    if backend not in {"qwen", "kokoro"}:
+        raise ValueError(f"unknown tts.backend: {backend}")
+    tts = (KokoroConfig if backend == "kokoro" else TTSConfig)(**tts_values)
     asr = ASRConfig(**asr_values)
     qc = QCConfig(**_mapping(raw.get("qc"), "qc"))
 
@@ -166,7 +205,7 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("run.max_pairs_per_shard must be positive")
     if run.checkpoint_every < 1:
         raise ValueError("run.checkpoint_every must be positive")
-    if set(sources) != {"jesc", "kftt"}:
+    if not external and set(sources) != {"jesc", "kftt"}:
         raise ValueError("sources must contain exactly jesc and kftt")
     if smoke.pair_count < 1:
         raise ValueError("smoke.pair_count must be positive")
@@ -176,6 +215,74 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError(
             "smoke.minimum_free_gib must cover smoke.maximum_output_gib"
         )
+    if external:
+        counts = [prepare.expected_train_pairs, prepare.expected_dev_pairs, prepare.expected_test_pairs]
+        if any(type(n) is not int or n < 0 for n in counts) or sum(counts) != prepare.expected_total_pairs or sum(counts) < 1:
+            raise ValueError("external expected counts must be nonnegative integers summing to total")
+        if run.input_jsonl != prepare.manifest:
+            raise ValueError("run.input_jsonl must equal prepare.manifest")
+    else:
+        _validate_legacy_prepare(prepare)
+    if backend == "kokoro":
+        if not external:
+            raise ValueError("Kokoro profile requires external_manifest")
+        if tts.device not in {"auto", "cpu", "cuda", "cuda:0"}:
+            raise ValueError("Kokoro device must be auto, cpu, or cuda")
+        if tts.dtype != "float32" or tts.native_sample_rate != 24000:
+            raise ValueError("Kokoro uses float32 and native 24000 Hz")
+        if tts.max_content_retries != 0 or tts.batch_size != 1:
+            raise ValueError("Kokoro uses max_content_retries=0 and batch_size=1; unset S2ST_TTS_BATCH_SIZE")
+        if not math.isfinite(tts.speed) or tts.speed <= 0:
+            raise ValueError("Kokoro speed must be finite and positive")
+        if not re.fullmatch(r"[0-9a-f]{40}", tts.revision):
+            raise ValueError("Kokoro revision must be an immutable commit SHA")
+        if tts.model_id != "hexgrad/Kokoro-82M":
+            raise ValueError("this backend supports hexgrad/Kokoro-82M")
+        for voice, pattern in ((tts.ja_voice, r"j[fm]_[a-z]+"), (tts.en_voice, r"a[fm]_[a-z]+")):
+            if not re.fullmatch(pattern, voice):
+                raise ValueError(f"unsupported voice name: {voice}")
+    for name, source in sources.items():
+        if not isinstance(source.version, str) or not source.version:
+            raise ValueError(f"sources.{name}.version must be a quoted string")
+        if not isinstance(source.license_id, str) or not source.license_id:
+            raise ValueError(f"sources.{name}.license_id must be a string")
+        if not source.url.startswith("https://"):
+            raise ValueError(f"sources.{name}.url must use HTTPS")
+        if not source.archive_name.endswith(".tar.gz"):
+            raise ValueError(f"sources.{name}.archive_name must be a .tar.gz")
+        if source.sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", source.sha256):
+            raise ValueError(f"sources.{name}.sha256 must be lowercase SHA-256")
+    if min(run.minimum_free_gib, run.minimum_cache_free_gib, run.maximum_output_gib) < 1:
+        raise ValueError("disk limits must be positive")
+    if not 0 <= run.retry_storage_fraction <= 1:
+        raise ValueError("run.retry_storage_fraction must be between 0 and 1")
+    if tts.max_content_retries not in (0, 1):
+        raise ValueError("tts.max_content_retries must be 0 or 1")
+    if any(type(size) is not int or size < 1 for size in (tts.batch_size, asr.batch_size)):
+        raise ValueError("tts.batch_size and asr.batch_size must be positive integers")
+    if backend == "qwen":
+        if tts.device != "cuda:0":
+            raise ValueError("Qwen must use cuda:0")
+        if tts.dtype not in {"auto", "float16", "bfloat16"}:
+            raise ValueError("Qwen dtype must be auto, float16, or bfloat16")
+        if not device.require_cuda:
+            raise ValueError("the Qwen corpus pipeline requires CUDA")
+    if asr.dtype != "float16":
+        raise ValueError("production Whisper must use float16")
+    if device.minimum_vram_gib <= 0:
+        raise ValueError("device.minimum_vram_gib must be positive")
+    if device.require_bf16 and tts.dtype == "float16":
+        raise ValueError("a BF16-required profile cannot select float16")
+    if tts.output_sample_rate != 16000:
+        raise ValueError("canonical corpus audio must be 16 kHz")
+    if not (0 <= qc.max_ja_cer <= 1 and 0 <= qc.max_en_wer <= 1):
+        raise ValueError("QC error-rate thresholds must be between 0 and 1")
+    if qc.min_duration_seconds >= qc.max_duration_seconds:
+        raise ValueError("invalid QC duration range")
+    return AppConfig(run, prepare, sources, smoke, device, tts, asr, qc)
+
+
+def _validate_legacy_prepare(prepare: PrepareConfig) -> None:
     if prepare.target_train_hours <= 0:
         raise ValueError("prepare.target_train_hours must be positive")
     if not 0 < prepare.jesc_fraction < 1:
@@ -195,58 +302,3 @@ def load_config(path: Path) -> AppConfig:
     )
     if abs(length_fractions - 1.0) > 1e-9:
         raise ValueError("prepare length time fractions must sum to 1")
-    for name, source in sources.items():
-        if not isinstance(source.version, str) or not source.version:
-            raise ValueError(f"sources.{name}.version must be a quoted string")
-        if not isinstance(source.license_id, str) or not source.license_id:
-            raise ValueError(f"sources.{name}.license_id must be a string")
-        if not source.url.startswith("https://"):
-            raise ValueError(f"sources.{name}.url must use HTTPS")
-        if not source.archive_name.endswith(".tar.gz"):
-            raise ValueError(f"sources.{name}.archive_name must be a .tar.gz")
-        if source.sha256 is not None and (
-            len(source.sha256) != 64
-            or any(character not in "0123456789abcdef" for character in source.sha256)
-        ):
-            raise ValueError(f"sources.{name}.sha256 must be lowercase SHA-256")
-    if (
-        run.minimum_free_gib < 1
-        or run.minimum_cache_free_gib < 1
-        or run.maximum_output_gib < 1
-    ):
-        raise ValueError("disk limits must be positive")
-    if not 0 <= run.retry_storage_fraction <= 1:
-        raise ValueError("run.retry_storage_fraction must be between 0 and 1")
-    if tts.max_content_retries not in (0, 1):
-        raise ValueError("tts.max_content_retries must be 0 or 1")
-    if any(type(size) is not int or size < 1 for size in (tts.batch_size, asr.batch_size)):
-        raise ValueError("tts.batch_size and asr.batch_size must be positive integers")
-    if tts.device != "cuda:0":
-        raise ValueError("Qwen must use cuda:0")
-    if tts.dtype not in {"auto", "float16", "bfloat16"}:
-        raise ValueError("Qwen dtype must be auto, float16, or bfloat16")
-    if asr.dtype != "float16":
-        raise ValueError("production Whisper must use float16")
-    if not device.require_cuda:
-        raise ValueError("the corpus pipeline requires CUDA")
-    if device.minimum_vram_gib <= 0:
-        raise ValueError("device.minimum_vram_gib must be positive")
-    if device.require_bf16 and tts.dtype == "float16":
-        raise ValueError("a BF16-required profile cannot select float16")
-    if tts.output_sample_rate != 16000:
-        raise ValueError("canonical corpus audio must be 16 kHz")
-    if not (0 <= qc.max_ja_cer <= 1 and 0 <= qc.max_en_wer <= 1):
-        raise ValueError("QC error-rate thresholds must be between 0 and 1")
-    if qc.min_duration_seconds >= qc.max_duration_seconds:
-        raise ValueError("invalid QC duration range")
-
-    return AppConfig(
-        run=run,
-        prepare=prepare,
-        sources=sources,
-        smoke=smoke,
-        device=device,
-        tts=tts,
-        asr=asr,
-        qc=qc,
-    )

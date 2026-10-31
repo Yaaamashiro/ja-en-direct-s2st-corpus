@@ -41,9 +41,18 @@ def select_smoke_pairs(
     source_manifest: Path,
     destination: Path,
     pair_count: int,
+    external: bool = False,
 ) -> list[dict[str, Any]]:
     if pair_count < 1:
         raise ValueError("pair_count must be positive")
+    if external:
+        from itertools import islice
+        # Export order, all splits, no sentence/length/content re-selection.
+        rows = list(islice(iter_pairs(source_manifest), pair_count))
+        if len(rows) != pair_count:
+            raise ValueError(f"only {len(rows)} pairs available; requested {pair_count}")
+        atomic_write_jsonl(destination, rows)
+        return rows
 
     preferred = list(_PREFERRED_SLOTS[:pair_count])
     selected: list[dict[str, Any] | None] = [None] * len(preferred)

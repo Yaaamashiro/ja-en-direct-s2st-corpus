@@ -1,0 +1,22 @@
+# Python 3.12 recommended; install torch separately from the CUDA wheel index.
+kokoro==0.9.4
+misaki[ja,en]==0.9.4
+transformers==4.57.3
+huggingface-hub==0.36.0
+accelerate==1.12.0
+numpy==2.2.6
+soundfile==0.13.1
+soxr==1.1.0
+jiwer==4.0.0
+PyYAML==6.0.2
+pyopenjtalk==0.4.1
+spacy==3.8.11
+spacy-curated-transformers==0.3.1
+fugashi==1.5.2
+jaconv==0.5.0
+mojimoji==0.0.13
+unidic==1.1.0
+num2words==0.5.14
+phonemizer-fork==3.3.2
+espeakng-loader==0.2.4
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
