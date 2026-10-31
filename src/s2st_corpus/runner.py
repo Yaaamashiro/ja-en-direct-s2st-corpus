@@ -29,16 +29,16 @@ from .normalization import (
 )
 from .config import AppConfig
 from .manifest import (
-    pairs_for_shard,
     pcm16_storage_gib,
     plan_manifest,
     read_jsonl,
     write_checkpoint,
 )
 from .seeding import deterministic_seed, seed_everything
-from .external import is_external, ensure_identity, validate_external, write_json
+from .external import is_external, ensure_identity, write_json
 from .integrity import validate_records
 from . import metrics
+from .input_index import pairs_for_config, index_for_config
 
 
 def _shard_name(index: int, total: int) -> str:
@@ -111,8 +111,9 @@ def _materialize_hf_model(model_id: str, revision: str) -> str:
 
 def plan(config: AppConfig) -> dict[str, Any]:
     if is_external(config):
-        validate_external(config)
-    manifest = plan_manifest(config.run.input_jsonl, config.run.num_shards)
+        manifest = index_for_config(config).plan()
+    else:
+        manifest = plan_manifest(config.run.input_jsonl, config.run.num_shards)
     estimated_audio_gib = pcm16_storage_gib(
         config.run.expected_hours_per_language,
         retry_fraction=config.run.retry_storage_fraction,
@@ -834,17 +835,12 @@ def _run_shard(config: AppConfig, shard_index: int, provenance=None) -> Path:
     )
     if config.run.resume and final_path.is_file():
         if provenance is not None:
-            expected = pairs_for_shard(config.run.input_jsonl, shard_index, config.run.num_shards, config.run.max_pairs_per_shard)
+            expected = pairs_for_config(config, shard_index)
             validate_records(config, expected, read_jsonl(final_path), provenance, complete=True)
         print(f"[resume] completed shard found: {final_path}")
         return final_path
 
-    pairs = pairs_for_shard(
-        config.run.input_jsonl,
-        shard_index,
-        config.run.num_shards,
-        config.run.max_pairs_per_shard,
-    )
+    pairs = pairs_for_config(config, shard_index)
     checkpoint = (
         config.run.output_dir
         / "manifests"
@@ -933,7 +929,7 @@ def recheck_shard(config: AppConfig, shard_index: int) -> Path:
     records = list(read_jsonl(final_path))
     if is_external(config):
         provenance = ensure_identity(config)
-        pairs = pairs_for_shard(config.run.input_jsonl, shard_index, config.run.num_shards, config.run.max_pairs_per_shard)
+        pairs = pairs_for_config(config, shard_index)
         validate_records(config, pairs, records, provenance, complete=True)
     if not records:
         raise ValueError("No saved records to recheck")

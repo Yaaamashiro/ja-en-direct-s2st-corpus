@@ -315,6 +315,10 @@ MyDrive/ja-en-direct-s2st-corpus/
 
 `status` は完了manifestのID・provenanceを検査します。`run-shard` の再開と `consolidate` はWAVの実体も検査します。**同じ出力先を複数プロセスから同時実行しないでください。** 既定でnative 24 kHz音声は保存しません。必要なdebug runだけ `save_native: true` と別出力先を使えます。
 
+external manifestは**CLIプロセスごとに最初の1回だけ**元JSONLを読み、同じ読み込みでSHA256を計算してローカルSQLiteへ索引化します。exportの検証結果とrun identityもプロセス内で共有します。各shardは `WHERE shard = ?`、statusは同じ索引のpair_id検索を使い、完了shard数に比例して元manifestを読み直しません。plan・smokeの元record照合・release統合でも索引を再利用します。本文・順序・shard割り当ては従来どおりです。
+
+索引はColabでは `/content/s2st-input-index/` に保存します（`S2ST_INPUT_INDEX_DIR` で変更可能。未指定時はOSのローカル一時領域）。索引を別CLIプロセスへ引き継がず、再接続・新しいCLIでは元ファイルを検証して作り直します。各shardではmanifest・export summaryのsize/mtime等を確認し、途中変更があればキャッシュを黙って更新せず停止します。統合時はJSONL公開の直前に元manifest・summary・smoke subsetのSHA256を再確認します。単独の `run-shard` / `run-next-shard` CLIも終了時に全ハッシュを再確認します。従って `run-remaining-shards` では元manifestの全読み込みは通常「初回の索引化＋最後のハッシュ確認」の2回です。WAVの整合性検査は省略しません。
+
 ### 結果・速度の読み方
 
 WhisperとQC閾値は従来どおり（JA CER≤0.10、EN WER≤0.10、0.7〜30秒）。Kokoroのcontent retryは0です。`[done]` はshardの処理終了を意味し、全ペア合格とは限りません。`alignment-transfer-s2ut` にはtrain/devを含む `accepted.jsonl` を渡し、trainerが `split` に従って学習・検証に分けます。

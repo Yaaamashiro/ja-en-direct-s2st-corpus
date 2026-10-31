@@ -21,11 +21,14 @@ def stable_shard(pair_id: str, num_shards: int) -> int:
     return int.from_bytes(digest[:8], "big") % num_shards
 
 
-def iter_pairs(path: Path, *, check_unique: bool = True) -> Iterator[dict[str, Any]]:
+def iter_pairs(path: Path, *, check_unique: bool = True, digest=None) -> Iterator[dict[str, Any]]:
     seen: set[str] = set()
     found = False
-    with path.open("r", encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
+    with path.open("rb") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            if digest is not None:
+                digest.update(raw_line)
+            line = raw_line.decode("utf-8")
             if not line.strip():
                 continue
             try:

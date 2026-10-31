@@ -10,7 +10,8 @@ from .config import load_config
 from .corpora import prepare_corpora
 from .runner import consolidate, plan, recheck_shard, run_shard
 from .smoke import select_smoke_pairs, smoke_app_config
-from .external import is_external, validate_external, ensure_identity
+from .external import is_external, validate_external, ensure_identity, verify_inputs, reset_external_cache
+from .input_index import reset_indexes, index_for_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     from .io import reset_budgets
     reset_budgets()
+    reset_external_cache()
+    reset_indexes()
     args = build_parser().parse_args()
     config = load_config(args.config)
     if args.command in {"smoke-test", "recheck-smoke"}:
@@ -174,10 +177,10 @@ def main() -> None:
                 if provenance is None:
                     raise RuntimeError("completed output has no provenance")
                 # Status checks metadata; run_shard/consolidate additionally verify every WAV.
-                from .manifest import read_jsonl, pairs_for_shard
+                from .manifest import read_jsonl
                 rows = list(read_jsonl(path))
-                expected = pairs_for_shard(config.run.input_jsonl, index, config.run.num_shards, config.run.max_pairs_per_shard)
-                if {r["pair_id"] for r in rows} != {r["pair_id"] for r in expected} or any(r.get("provenance") != provenance for r in rows):
+                expected_ids = index_for_config(config).pair_ids(index, config.run.max_pairs_per_shard)
+                if len(rows) != len(expected_ids) or {r["pair_id"] for r in rows} != expected_ids or any(r.get("provenance") != provenance for r in rows):
                     raise RuntimeError(f"invalid completed shard: {path}")
             (completed if path.is_file() else remaining).append(index)
         result = {
@@ -201,6 +204,8 @@ def main() -> None:
                       next_shard=remaining[0] if remaining else None)
     else:
         result = consolidate(config, allow_incomplete=args.allow_incomplete)
+    if is_external(config) and args.command in {"run-shard", "run-next-shard"}:
+        verify_inputs(config)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 
 

@@ -11,7 +11,8 @@ from contextlib import ExitStack, closing
 from pathlib import Path
 
 from . import metrics
-from .external import ensure_identity, is_external, write_json
+from .external import ensure_identity, is_external, write_json, verify_inputs
+from .input_index import index_for_config
 from .integrity import validate_records
 from .io import account_replace, file_size
 from .manifest import iter_pairs, read_jsonl, stable_shard
@@ -37,13 +38,19 @@ def _consolidate(config, allow_incomplete, started, measurements):
             db.execute("PRAGMA cache_size=-2048")
             db.execute("CREATE TABLE pairs (ordinal INTEGER PRIMARY KEY, pair_id TEXT UNIQUE, shard INTEGER, input_json TEXT, qc_json TEXT)")
             db.execute("CREATE INDEX by_shard ON pairs(shard)")
-            try:
-                for ordinal, pair in enumerate(iter_pairs(config.run.input_jsonl, check_unique=False)):
-                    db.execute("INSERT INTO pairs VALUES (?, ?, ?, ?, NULL)",
-                               (ordinal, pair["pair_id"], stable_shard(pair["pair_id"], config.run.num_shards),
-                                json.dumps(pair, ensure_ascii=False)))
-            except sqlite3.IntegrityError as error:
-                raise ValueError("duplicate pair_id in input manifest") from error
+            if provenance is not None:
+                index = index_for_config(config)
+                index.check()
+                db.execute("ATTACH DATABASE ? AS input_index", (str(index.path),))
+                db.execute("INSERT INTO pairs(ordinal,pair_id,shard,input_json) SELECT ordinal,pair_id,shard,input_json FROM input_index.pairs")
+            else:
+                try:
+                    for ordinal, pair in enumerate(iter_pairs(config.run.input_jsonl, check_unique=False)):
+                        db.execute("INSERT INTO pairs VALUES (?, ?, ?, ?, NULL)",
+                                   (ordinal, pair["pair_id"], stable_shard(pair["pair_id"], config.run.num_shards),
+                                    json.dumps(pair, ensure_ascii=False)))
+                except sqlite3.IntegrityError as error:
+                    raise ValueError("duplicate pair_id in input manifest") from error
             db.commit()
             missing = []
             for index in range(config.run.num_shards):
@@ -146,6 +153,8 @@ def _publish(db, config, release, missing, missing_pairs, provenance, started, m
             summary[key] = sum(r.get(key, 0) for r in invocations) + measurements.get(key, 0)
         # Old files remain valid while staging. Invalidate the old completion
         # marker before the first replacement; publish the new marker LAST.
+        if provenance is not None:
+            verify_inputs(config)
         marker = release / "summary.json"
         previous_marker_bytes = file_size(marker)
         marker.unlink(missing_ok=True)

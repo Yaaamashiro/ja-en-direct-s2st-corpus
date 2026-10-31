@@ -2,15 +2,14 @@
 from __future__ import annotations
 
 import json
-from itertools import islice
-from collections import Counter
+import hashlib
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from importlib.metadata import version, PackageNotFoundError
 
 from .audio import sha256_file
 from .config import AppConfig, ExternalPrepareConfig
-from .manifest import iter_pairs
 
 
 def is_external(config: AppConfig) -> bool:
@@ -27,57 +26,94 @@ def write_json(path: Path, value: dict) -> None:
     account_replace(path, previous_bytes)
 
 
+_VALIDATIONS = {}
+_IDENTITIES = {}
+
+
+def reset_external_cache():
+    _VALIDATIONS.clear()
+    _IDENTITIES.clear()
+
+
+def _validation_key(config):
+    return json.dumps(asdict(config.prepare), default=str, sort_keys=True)
+
+
 def validate_external(config: AppConfig) -> dict:
+    from .input_index import file_stamp, get_index
     p = config.prepare
     if not isinstance(p, ExternalPrepareConfig):
         raise ValueError("external manifest configuration required")
-    summary = json.loads(p.summary.read_text(encoding="utf-8"))
+    key = _validation_key(config)
+    index = get_index(p.manifest, config.run.num_shards)
+    stamp = file_stamp(p.summary)
+    if key in _VALIDATIONS:
+        cached_stamp, cached = _VALIDATIONS[key]
+        if stamp != cached_stamp:
+            raise ValueError("export summary changed during this process")
+        if index.digest != cached["manifest_sha256"]:
+            raise ValueError("input manifest differs from validated snapshot")
+        return deepcopy(cached)
+    raw_summary = p.summary.read_bytes()
+    summary = json.loads(raw_summary.decode("utf-8"))
     if summary.get("complete") is not True:
         raise ValueError("export summary.complete must be true")
     if summary.get("corpus") != p.expected_corpus:
         raise ValueError("export summary corpus mismatch")
     expected = {s: getattr(p, f"expected_{s}_pairs") for s in ("train", "dev", "test")}
-    for key, count in {"total": p.expected_total_pairs, **expected}.items():
-        if type(summary.get(f"{key}_pairs")) is not int or summary[f"{key}_pairs"] != count:
-            raise ValueError(f"export summary {key}_pairs mismatch")
-    digest = sha256_file(p.manifest)
-    if summary.get("output_sha256") != digest:
+    for name, count in {"total": p.expected_total_pairs, **expected}.items():
+        if type(summary.get(f"{name}_pairs")) is not int or summary[f"{name}_pairs"] != count:
+            raise ValueError(f"export summary {name}_pairs mismatch")
+    if summary.get("output_sha256") != index.digest:
         raise ValueError("export manifest SHA256 mismatch")
-    counts = Counter()
-    # iter_pairs enforces unique, filename-safe IDs and nonempty text, streaming.
-    for pair in iter_pairs(p.manifest):
+    for pair in index.iter_rows():
         if pair["split"] not in expected:
             raise ValueError(f"invalid split: {pair['split']}")
         if pair["corpus"] != p.expected_corpus:
             raise ValueError(f"wrong corpus: {pair['pair_id']}")
         if type(pair.get("length_bin")) is not int:
             raise ValueError(f"length_bin must be an integer: {pair['pair_id']}")
-        counts[pair["split"]] += 1
+    counts = index.counts
     if any(counts[s] != expected[s] for s in expected) or sum(counts.values()) != p.expected_total_pairs:
         raise ValueError(f"manifest counts mismatch: {dict(counts)}")
-    return {"complete": True, "corpus": p.expected_corpus,
-            "manifest": str(p.manifest), "manifest_sha256": digest,
-            "summary": str(p.summary), "summary_sha256": sha256_file(p.summary),
-            "total_pairs": sum(counts.values()), **{f"{s}_pairs": counts[s] for s in expected}}
+    index.check()
+    if file_stamp(p.summary) != stamp:
+        raise ValueError("export summary changed during validation")
+    result = {"complete": True, "corpus": p.expected_corpus,
+              "manifest": str(p.manifest), "manifest_sha256": index.digest,
+              "summary": str(p.summary), "summary_sha256": hashlib.sha256(raw_summary).hexdigest(),
+              "total_pairs": sum(counts.values()), **{f"{s}_pairs": counts[s] for s in expected}}
+    _VALIDATIONS[key] = (stamp, result)
+    return deepcopy(result)
 
 
 def run_identity(config: AppConfig) -> dict:
+    from .input_index import get_index
+    validation = validate_external(config)
+    index = get_index(config.run.input_jsonl, config.run.num_shards)
+    key = (_validation_key(config), str(config.run.input_jsonl.resolve()),
+           config.run.num_shards, config.run.save_native,
+           json.dumps([asdict(config.tts), asdict(config.qc), asdict(config.asr)], sort_keys=True))
+    if key in _IDENTITIES:
+        if index.digest != _IDENTITIES[key]["run_input_sha256"]:
+            raise ValueError("run input differs from validated snapshot")
+        return deepcopy(_IDENTITIES[key])
     if config.run.input_jsonl != config.prepare.manifest:
-        subset = {p["pair_id"]: p for p in islice(iter_pairs(config.run.input_jsonl), 1001)}
-        if len(subset) > 1000 or config.run.num_shards != 1:
+        if sum(index.shard_counts) > 1000 or config.run.num_shards != 1:
             raise ValueError("alternate input is allowed only for <=1000-pair smoke runs")
-        found = set()
-        for pair in iter_pairs(config.prepare.manifest):
-            if pair["pair_id"] in subset:
-                if subset[pair["pair_id"]] != pair:
-                    raise ValueError("smoke input differs from exported record")
-                found.add(pair["pair_id"])
-        if found != set(subset):
-            raise ValueError("smoke input contains unknown records")
-    identity = {"input": validate_external(config), "tts": asdict(config.tts),
+        source = get_index(config.prepare.manifest, config.run.num_shards)
+        for pair in index.iter_rows():
+            original = source.lookup(pair["pair_id"])
+            if original is None:
+                raise ValueError("smoke input contains unknown records")
+            if original != pair:
+                raise ValueError("smoke input differs from exported record")
+        source.check()
+        index.check()
+    identity = {"input": validation, "tts": asdict(config.tts),
                 "qc": asdict(config.qc), "asr": asdict(config.asr),
                 "num_shards": config.run.num_shards, "save_native": config.run.save_native,
-                "run_input_sha256": sha256_file(config.run.input_jsonl)}
+                "run_input_sha256": index.digest}
     if config.tts.backend == "kokoro":
         installed = version("kokoro")
         if installed != config.tts.package_version:
@@ -93,6 +129,7 @@ def run_identity(config: AppConfig) -> dict:
             except PackageNotFoundError:
                 dependencies[name] = None
         identity["runtime_dependencies"] = dependencies
+    _IDENTITIES[key] = deepcopy(identity)
     return identity
 
 
@@ -108,3 +145,17 @@ def ensure_identity(config: AppConfig) -> dict:
             raise RuntimeError("existing output has no provenance; use a separate output_dir")
         write_json(path, identity)
     return identity
+
+
+def verify_inputs(config: AppConfig) -> None:
+    """Final full hashes, including changes hidden by restored size/mtime."""
+    from .input_index import get_index
+    validation = validate_external(config)
+    expected = {config.prepare.manifest: validation["manifest_sha256"],
+                config.prepare.summary: validation["summary_sha256"]}
+    expected[config.run.input_jsonl] = get_index(config.run.input_jsonl, config.run.num_shards).digest
+    for path, digest in expected.items():
+        if sha256_file(path) != digest:
+            raise ValueError(f"final input SHA256 mismatch: {path}")
+    validate_external(config)  # also detect a change while final hashes were read
+    get_index(config.run.input_jsonl, config.run.num_shards).check()

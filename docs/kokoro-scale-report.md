@@ -1,5 +1,7 @@
 # Kokoro + JParaCrawl 本番前修正レポート
 
+後続の入力側I/O最適化は [入力manifest I/O修正レポート](kokoro-input-index-report.md) を参照してください。
+
 ## Git
 
 - branch: `feature/kokoro-tts`

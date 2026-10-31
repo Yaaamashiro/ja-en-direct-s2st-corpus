@@ -12,6 +12,7 @@ from .io import atomic_write_jsonl
 from .manifest import iter_pairs
 from .audio import sha256_file
 from .external import write_json, is_external
+from .input_index import cached_index
 
 
 BENCHMARK_QUOTAS = {0: 20, 1: 150, 2: 400, 3: 330, 4: 100}
@@ -19,7 +20,9 @@ BENCHMARK_QUOTAS = {0: 20, 1: 150, 2: 400, 3: 330, 4: 100}
 
 def select_benchmark_pairs(source_manifest, destination, seed=42):
     heaps = {b: [] for b in BENCHMARK_QUOTAS}
-    for ordinal, pair in enumerate(iter_pairs(source_manifest)):
+    index = cached_index(source_manifest)
+    source_rows = index.iter_rows() if index is not None else iter_pairs(source_manifest)
+    for ordinal, pair in enumerate(source_rows):
         b = pair.get("length_bin")
         if pair["split"] != "train" or b not in heaps:
             continue
@@ -38,7 +41,7 @@ def select_benchmark_pairs(source_manifest, destination, seed=42):
     write_json(destination.with_suffix(".selection.json"), {
         "selection_method": "train_length_bin_sha256_ranking", "seed": seed,
         "length_bin_quotas": BENCHMARK_QUOTAS,
-        "source_manifest_sha256": sha256_file(source_manifest),
+        "source_manifest_sha256": index.digest if index is not None else sha256_file(source_manifest),
         "selected_pair_ids": [r["pair_id"] for r in rows],
     })
     return rows
@@ -85,7 +88,8 @@ def select_smoke_pairs(
             return select_benchmark_pairs(source_manifest, destination, benchmark_seed)
         from itertools import islice
         # Export order, all splits, no sentence/length/content re-selection.
-        rows = list(islice(iter_pairs(source_manifest), pair_count))
+        index = cached_index(source_manifest)
+        rows = list(islice(index.iter_rows() if index is not None else iter_pairs(source_manifest), pair_count))
         if len(rows) != pair_count:
             raise ValueError(f"only {len(rows)} pairs available; requested {pair_count}")
         atomic_write_jsonl(destination, rows)
