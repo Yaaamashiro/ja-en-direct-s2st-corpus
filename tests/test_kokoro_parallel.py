@@ -153,6 +153,25 @@ def test_parallel_completion_order_parent_checkpoint_and_resume(config, monkeypa
     assert len(calls) == 120
 
 
+def test_parallel_queue_is_longest_first_with_deterministic_ties(config, monkeypatch, tmp_path):
+    c = replace(config, tts=replace(config.tts, worker_count=2))
+    records = [runner._new_record({"pair_id":"p0", "ja_text":"短", "en_text":"longest text"}, True),
+               runner._new_record({"pair_id":"p1", "ja_text":"同じ", "en_text":"ab"}, True)]
+    missing = {(r["pair_id"], lang) for r in records for lang in ("ja", "en")}
+    captured = []
+    monkeypatch.setattr(kokoro_backend, "materialize_assets", lambda c: tmp_path)
+    def results(config, shard, tasks, root, **kwargs):
+        captured.extend(tasks)
+        for pid, lang, _, text in reversed(tasks):
+            yield event_for(config, pid, lang)
+    monkeypatch.setattr(kp, "iter_worker_results", results)
+    runner._generate_missing(c, "test", records, 0, missing, tmp_path / "cp.jsonl")
+    assert [t[:2] for t in captured] == [("p0","en"), ("p1","en"), ("p1","ja"), ("p0","ja")]
+    expected = {(r["pair_id"], lang): r[f"{lang}_tts_text"] for r in records for lang in ("ja","en")}
+    assert len(captured) == len(expected) and all(text == expected[pid, lang] for pid, lang, _, text in captured)
+    assert all(len(r["attempts"][lang]) == 1 for r in records for lang in ("ja","en"))
+
+
 def test_parent_flushes_received_results_on_cuda_failure(config, monkeypatch, tmp_path):
     c = replace(config, tts=replace(config.tts, worker_count=2))
     records = [runner._new_record({"pair_id": "p0", "ja_text": "文", "en_text": "text"}, True)]

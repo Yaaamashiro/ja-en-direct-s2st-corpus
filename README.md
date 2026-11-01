@@ -297,13 +297,13 @@ python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml 
 
 TTS tuningはtrainから固定seed=42で200 pair（bin別4/30/80/66/20件）を選び、同じtext/voiceでworker=1/2/4/6を比較します。音声は `/content/kokoro-l4-benchmark` のlocal SSDへ保存し、Drive上の `kokoro-performance/l4-performance.json` と日時付きsnapshot・logsへ結果を保存します。入力と音声のSHA256も記録します。`--local-dir` / `--report-dir` / `--workers 1 2 4 6` / `--asr-batches 8 16 24 32` で明示的に変更できます。8 workerは指定した場合のみ候補になります。TTS tuningを再実行すると新しいlocal runを作り、古い音声を使ったresume速度を測らないようにしています。
 
-Kokoroの並列数は `tts.worker_count` です。`tts.batch_size` は1のままにし、Qwenのbatch経路へ入りません。worker=1は既存の逐次経路、2以上は `multiprocessing.get_context('spawn')` の複数processです。親がモデル・voiceの固定assetを取得後、各workerはlocal assetからKModelを1回だけloadし、JA/EN pipelineを共有します。worker内のTorch CPU threadsは1です。dynamic queueでtaskを配り、各workerが24→16 kHz変換とatomic WAV保存まで行い、波形をIPC転送しません。
+Kokoroの並列数は `tts.worker_count` です。`tts.batch_size` は1のままにし、Qwenのbatch経路へ入りません。worker=1は既存の逐次経路、2以上は `multiprocessing.get_context('spawn')` の複数processです。親がモデル・voiceの固定assetを取得後、各workerはlocal assetからKModelを1回だけloadし、JA/EN pipelineを共有します。worker内のTorch CPU threadsは1です。文字数は処理時間の近似で、本文自体は変更しません。Unicode文字数の長いutteranceから先に並べ、同じ長さはpair_id/language/attemptで順序を固定してdynamic queueへ配り、各workerが24→16 kHz変換とatomic WAV保存まで行い、波形をIPC転送しません。
 
 親だけが完了metadataをrecordへ対応付け、100 utterance間隔でcheckpointを保存します。worker crashやCUDA fatal errorでは自動再起動せず、受信済みcheckpointを保存してCLIをfailure終了します。checkpointに記録されていないWAVはorphanとして再生成し、記録済みWAVのSHA256等の検証を緩めません。全TTS workerを終了・joinしてからWhisperをloadし、TTS/ASRをGPU上でoverlapさせません。
 
-Whisper tuningはTTS tuningで作った同じ音声を使い、batch=8/16/24/32をそれぞれ新しいspawn subprocessで実行します。OOM候補は `status: oom` として記録し、そのprocess終了後に次を試します。音声がランタイム消去で失われた場合はTTS tuningから再実行してください。ASR model/processorは親が固定revisionを取得し、候補側はoffline cacheを使います。
+Whisper tuningはTTS tuningで作った同じ音声を使い、batch=8/16/24/32をそれぞれ新しいspawn subprocessで実行します。OOM候補は `status: oom` として記録し、そのprocess終了後に次を試します。音声がランタイム消去で失われた場合はTTS tuningから再実行してください。ASR model/processorは親が固定revisionを取得し、候補側はoffline cacheを使います。TTS→ASR tuningは同じGit commitで実行してください。commitが変わった場合や前回・現在のcommitを確認できない場合は、ASR候補起動前に停止し、TTS tuningの再実行を求めます。既存レポートのcommitを黙って更新しません。
 
-推奨値は `audio_seconds / wall_seconds` 最大の成功候補から計算します。headroom警告（総VRAMの90%超）・生成失敗・品質差がある候補は除外します。TTSはtext/voiceと大きなduration差（0.25秒または5%超）を比較し、Whisperは同じ音声のASR text・metric・QC判定を比較します。metric/QCが変わったASR候補は推奨しません。実worker数によるASR品質差のL4確認は未実施なので、microbenchmarkだけで本番へ進まず、選択設定で1000件full benchmarkを実行してください。
+推奨値は `audio_seconds / wall_seconds` 最大の成功候補から計算します。headroom警告（総VRAMの90%超）・生成失敗・品質差がある候補は除外します。TTSはtext/voiceと大きなduration差（0.25秒または5%超）を比較し、Whisperは同じ音声のASR text・metric・QC判定を比較します。transcript/metric/QCのいずれかが変わったASR候補は推奨しません。実worker数によるASR品質差のL4確認は未実施なので、microbenchmarkだけで本番へ進まず、選択設定で1000件full benchmarkを実行してください。
 
 VRAMはworkerごとのallocated/reserved peak・合計参考値・最大worker値を明示します。合計参考値は同時刻のGPU全体peakではなく、CUDA context等も含みません。benchmark時だけ約5秒間隔のnvidia-smiでGPU全体の使用量もサンプルし、瞬間的なpeakを捕捉できない可能性を残した上でreferenceと併用します。productionでは大量pollingを行わず、`gpu_utilization` は未取得（null）です。benchmarkのRTF/wallにはmodel load・worker startup・local WAV I/Oを含み、従来のattempt別TTS RTF（推論時間）とは区別します。
 

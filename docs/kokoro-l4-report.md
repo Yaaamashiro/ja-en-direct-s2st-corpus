@@ -14,7 +14,7 @@
 | Kokoro multiprocessing | worker_count>=2で専用pool。1は既存逐次baseline |
 | start method | spawn固定。fork contextは明示的に拒否 |
 | worker model loading | 親が固定assetを取得・存在検証。workerはlocal-onlyでKModelを1回loadし、JA/EN KPipelineとvoiceを共有 |
-| task scheduling | bounded dynamic queue。key=(pair_id, language, attempt)、重複task/resultを拒否 |
+| task scheduling | Unicode文字数の長いutteranceを先にbounded dynamic queueへ投入。同じ長さはpair_id/language/attemptで固定。key重複task/resultを拒否 |
 | WAV writing | worker内で24 kHz→mono→soxr HQ→16 kHz PCM16 atomic write。waveform IPCなし |
 | parent checkpoint | 完了metadataを正しいrecordへ追加し、100 utteranceごと・phase終了・例外時に保存。workerはmanifestを書かない |
 | resume | 検証済みcheckpointのWAVは再利用。orphanは再生成。破損WAVを正常扱いしない |
@@ -51,7 +51,8 @@ GPU名の完全一致は要求せず、別GPUならtarget/actualのwarningを表
 - 各候補を新しいspawn subprocessで実行。ASR OOMは候補の `status=oom` として記録し、process終了後に次へ進む。
 - ASRはTTS tuningの最初の全件成功候補の音声を固定して使う。各ASR候補の前後にWAV SHA256を確認する。
 - 親がKokoro/Whisperの固定revisionを取得し、候補側はoffline/local資源を使う。
-- 同じ条件・音声で品質を比較し、metric/QCが変わるASR候補を推奨しない。TTSはtext/voiceと大きなduration差を検査する。実L4でのworker間ASR品質比較は未実施。
+- 同じ条件・音声で品質を比較し、transcript/metric/QCのいずれかが変わるASR候補を推奨しない。TTSはtext/voiceと大きなduration差を検査する。実L4でのworker間ASR品質比較は未実施。
+- TTS→ASR tuningの実装commit一致を確認する。不一致・不明は候補起動前に停止し、以前のレポートを上書きしない。`--stage all` もASR phase直前にcommitを再確認する。
 - throughput最大を優先。headroom不足・generation failure・品質差のある候補は除外。推奨可能な候補がなければnull。
 - configを自動変更しない。production中のautotuneなし。performance-lockはoptionalのため未実装。
 
@@ -74,12 +75,13 @@ Drive / repo / deps / L4 config / validation / GPU / preload / voice
 
 ## Tests
 
-- 既存97件を含むローカルpytest：**119 passed**。既存tar展開に関するDeprecationWarning 2件のみ。GitHub CIの結果ではありません。
+- 既存97件を含むローカルpytest：**125 passed**（3点のレビュー修正・追加検証を含む）。既存tar展開に関するDeprecationWarning 2件のみ。GitHub CIの結果ではありません。
 - 実spawn＋FakeBackendで固定20 utterancesをworker=1/2/4で比較。全件1回、正しいpath/record、voice、16 kHz mono PCM16、duration、SHA256、atomic writeを確認。実Kokoro/GPUの品質比較ではありません。
 - worker CUDA errorの注入、実process crash(exit 17)、通常のempty generation failure、親checkpoint保存、100 utterance間隔、逆順completion、resume skip、orphan再生成、親storage budget差分を検査。
 - L4 profile / T4拒否 / 別GPU warning、throughputと90%headroomによる推奨、ASR品質差の除外を検査。
 - mock候補を使った200件抽出・全候補iteration・同じsample/audio・OOM後の次候補・report JSON・config不変を確認。
 - ASR batch=8/16/24/32で同じmock文字起こしから同じmetric/QCを得ることを確認。実Whisper/L4比較は未実施。
+- 後続レビュー対応では、longest-first順・同率時の決定性・本文不変、同じmetric/QCでtranscriptだけ違う候補の除外、同一commitでのASR継続、不一致/不明commitでの停止とレポート保持を追加検証。
 - 既存Kokoro runtime checkもCPUで実行成功。日英各1文、JA=3.875秒、EN=3.800秒、native/canonical形式を確認。`data/kokoro-l4-runtime-check/report.json`（Git対象外）。これは逐次TTS単体確認であり、L4性能値やparallel品質確認ではありません。既知のWindows phonemizer終了時cleanup警告あり、returncodeは0。
 
 ## Production defaults

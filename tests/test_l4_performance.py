@@ -66,6 +66,19 @@ def test_asr_quality_changes_exclude_candidate():
     assert perf.recommend(candidates, "batch_size", "audio_seconds_per_wall_second") == 8
 
 
+def test_transcript_difference_with_equal_metric_and_qc_is_not_equivalent():
+    candidates = [
+        {"status":"success", "batch_size":batch, "audio_seconds_per_wall_second":speed,
+         "quality":{"p:en":{"asr_text":text, "metric":.25, "qc_pass":False}}}
+        for batch, speed, text in ((8,100,"I like this book."), (24,200,"I like the book."))]
+    perf.compare_asr_quality(candidates)
+    candidate = candidates[1]
+    assert candidate["metric_changes"] == candidate["qc_disagreements"] == 0
+    assert candidate["transcript_changes"] == 1 and not candidate["quality_equivalent"]
+    assert candidates[0]["quality_equivalent"]
+    assert perf.recommend(candidates, "batch_size", "audio_seconds_per_wall_second") == 8
+
+
 def test_candidate_subprocess_isolation_and_oom(profile, tmp_path, monkeypatch):
     contexts, processes = [], []
     class Process:
@@ -91,6 +104,7 @@ def test_full_candidate_iteration_same_sample_audio_and_report(profile, tmp_path
     write_checkpoint(c.run.input_jsonl, rows)
     monkeypatch.setattr(perf, "validate_external", lambda c: {})
     monkeypatch.setattr(perf, "verify_inputs", lambda c: None)
+    monkeypatch.setattr(perf, "_implementation_commit", lambda: "a"*40)
     monkeypatch.setattr(runner, "gpu_preflight", lambda c: {"gpu":"NVIDIA L4", "vram_gib":24})
     monkeypatch.setattr(kokoro_backend, "materialize_assets", lambda c: tmp_path)
     import huggingface_hub
@@ -129,6 +143,25 @@ def test_full_candidate_iteration_same_sample_audio_and_report(profile, tmp_path
     assert asdict(c) == before and report["production_config_modified"] is False
     saved = json.loads((tmp_path / "reports/l4-performance.json").read_text(encoding="utf-8"))
     assert saved["asr_candidates"][1]["status"] == "oom"
+    # A separate ASR invocation on the same commit can use the fixed TTS audio.
+    resumed = perf.benchmark_performance(c, stage="asr", local_dir=tmp_path / "local", report_dir=tmp_path / "reports", batches=[8,16,24])
+    assert resumed["implementation_commit"] == "a"*40
+    assert resumed["recommended_asr_batch_size"] == 24
+
+
+@pytest.mark.parametrize("previous,current", [("a"*40,"b"*40), (None,"a"*40), ("a"*40,None), (None,None)])
+def test_asr_tuning_rejects_changed_or_unknown_commit_without_overwriting_report(profile, tmp_path, monkeypatch, previous, current):
+    report_dir = tmp_path / "reports"
+    report_path = report_dir / "l4-performance.json"
+    write_json(report_path, {"implementation_commit": previous})
+    before = report_path.read_bytes()
+    monkeypatch.setattr(runner, "gpu_preflight", lambda c: {"gpu":"NVIDIA L4", "vram_gib":24})
+    monkeypatch.setattr(perf, "validate_external", lambda c: {})
+    monkeypatch.setattr(perf, "_implementation_commit", lambda: current)
+    monkeypatch.setattr(perf, "run_candidate", lambda *a: pytest.fail("commit mismatch must stop before candidate launch"))
+    with pytest.raises(ValueError, match="implementation commit mismatch/unknown"):
+        perf.benchmark_performance(profile, stage="asr", local_dir=tmp_path / "local", report_dir=report_dir)
+    assert report_path.read_bytes() == before
 
 
 def test_tuning_rejects_drive_audio(profile, tmp_path):

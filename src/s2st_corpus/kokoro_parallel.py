@@ -167,7 +167,10 @@ def generate_missing_parallel(config, shard_name, records, attempt, missing, che
     from .runner import _IntervalCheckpoint, _paths
     saver = _IntervalCheckpoint(config, checkpoint_path, records)
     by_id = {r["pair_id"]: r for r in records}
-    tasks = [(pid, lang, attempt, by_id[pid][f"{lang}_tts_text"]) for pid, lang in sorted(missing)]
+    tasks = [(pid, lang, attempt, by_id[pid][f"{lang}_tts_text"]) for pid, lang in missing]
+    # Unicode character count is a cheap length proxy, not a duration model.
+    # Start long utterances first to reduce the final pool tail; preserve text.
+    tasks.sort(key=lambda task: (-len(task[3]), task[0], task[1], task[2]))
     worker_stats = {}
     events = None
     def record_stats():

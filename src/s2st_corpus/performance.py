@@ -175,10 +175,11 @@ def compare_asr_quality(candidates):
         mismatches = len(reference.keys() ^ quality.keys()) + sum(
             reference[k]["qc_pass"] != quality[k]["qc_pass"] for k in common)
         metric_changes = sum(reference[k].get("metric") != quality[k].get("metric") for k in common)
+        transcript_changes = sum(reference[k].get("asr_text") != quality[k].get("asr_text") for k in common)
         candidate.update(reference_asr_batch_size=baseline["batch_size"], qc_disagreements=mismatches,
                          metric_changes=metric_changes,
-                         transcript_changes=sum(reference[k].get("asr_text") != quality[k].get("asr_text") for k in common),
-                         quality_equivalent=mismatches == 0 and metric_changes == 0)
+                         transcript_changes=transcript_changes,
+                         quality_equivalent=mismatches == 0 and metric_changes == 0 and transcript_changes == 0)
 
 
 def compare_tts_quality(candidates):
@@ -207,6 +208,20 @@ def _headroom(result, hardware):
     peak = max(peak or 0, result.get("peak_reserved_vram_gib_reference", 0))
     result["headroom_warning"] = peak > .9 * hardware["vram_gib"]
     result["headroom_measurement"] = "sampled GPU-wide used memory" if result.get("gpu_peak_used_gib_sampled") is not None else "per-process reserved peak reference; GPU-wide memory unavailable"
+
+
+def _implementation_commit():
+    try:
+        repository = Path(__file__).resolve().parents[2]
+        return subprocess.check_output(["git", "-c", f"safe.directory={repository.as_posix()}", "rev-parse", "HEAD"],
+                                       cwd=repository, text=True, stderr=subprocess.DEVNULL, timeout=5).strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _require_same_commit(previous, current):
+    if not previous or not current or previous != current:
+        raise ValueError(f"tuning implementation commit mismatch/unknown: TTS={previous}, current={current}; rerun TTS tuning from the same Git checkout")
 
 
 def benchmark_performance(config, stage="all", local_dir=None, report_dir=None, workers=None, batches=None):
@@ -243,12 +258,12 @@ def benchmark_performance(config, stage="all", local_dir=None, report_dir=None, 
     asr_conditions = {k: v for k, v in asdict(config.asr).items() if k != "batch_size"}
     if stage == "asr" and report.get("synthesis_conditions") is not None and (report["synthesis_conditions"] != synthesis_conditions or report["asr_conditions"] != asr_conditions or report["input_validation"] != validation):
         raise ValueError("tuning input/model/voice/ASR conditions changed; rerun TTS tuning")
-    report.update(synthesis_conditions=synthesis_conditions, asr_conditions=asr_conditions, input_validation=validation)
-    try:
-        repository = Path(__file__).resolve().parents[2]
-        report["implementation_commit"] = subprocess.check_output(["git", "-c", f"safe.directory={repository.as_posix()}", "rev-parse", "HEAD"], cwd=repository, text=True, timeout=5).strip()
-    except (OSError, subprocess.SubprocessError):
-        report["implementation_commit"] = None
+    current_commit = _implementation_commit()
+    if stage == "asr":
+        # Check the saved TTS commit BEFORE overwriting its provenance.
+        _require_same_commit(report.get("implementation_commit"), current_commit)
+    report.update(synthesis_conditions=synthesis_conditions, asr_conditions=asr_conditions,
+                  input_validation=validation, implementation_commit=current_commit)
     if stage in {"tts", "all"}:
         sample = workspace / "sample.jsonl"
         rows = select_benchmark_pairs(config.run.input_jsonl, sample, seed=42, quotas=TUNING_QUOTAS)
@@ -270,6 +285,7 @@ def benchmark_performance(config, stage="all", local_dir=None, report_dir=None, 
             report["recommended_tts_workers"] = recommend(report["tts_candidates"], "worker_count", "audio_hours_per_wall_hour")
             write_json(report_path, report)
     if stage in {"asr", "all"}:
+        _require_same_commit(report.get("implementation_commit"), _implementation_commit())
         source = report.get("fixed_audio_manifest")
         if not source or not Path(source).is_file():
             raise ValueError("fixed local TTS audio is unavailable; run TTS tuning again in this runtime")
