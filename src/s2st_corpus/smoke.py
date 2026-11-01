@@ -18,8 +18,9 @@ from .input_index import cached_index
 BENCHMARK_QUOTAS = {0: 20, 1: 150, 2: 400, 3: 330, 4: 100}
 
 
-def select_benchmark_pairs(source_manifest, destination, seed=42):
-    heaps = {b: [] for b in BENCHMARK_QUOTAS}
+def select_benchmark_pairs(source_manifest, destination, seed=42, quotas=None):
+    quotas = BENCHMARK_QUOTAS if quotas is None else quotas
+    heaps = {b: [] for b in quotas}
     index = cached_index(source_manifest)
     source_rows = index.iter_rows() if index is not None else iter_pairs(source_manifest)
     for ordinal, pair in enumerate(source_rows):
@@ -29,18 +30,18 @@ def select_benchmark_pairs(source_manifest, destination, seed=42):
         rank = int.from_bytes(hashlib.sha256(f"{seed}:{pair['pair_id']}".encode()).digest(), "big")
         item = (-rank, pair["pair_id"], ordinal, pair)
         heap = heaps[b]
-        if len(heap) < BENCHMARK_QUOTAS[b]:
+        if len(heap) < quotas[b]:
             heapq.heappush(heap, item)
         elif item > heap[0]:
             heapq.heapreplace(heap, item)
-    if any(len(heaps[b]) != n for b, n in BENCHMARK_QUOTAS.items()):
+    if any(len(heaps[b]) != n for b, n in quotas.items()):
         raise ValueError("not enough training records for benchmark length-bin quotas")
     selected = sorted((item for heap in heaps.values() for item in heap), key=lambda item: item[2])
     rows = [item[3] for item in selected]
     atomic_write_jsonl(destination, rows)
     write_json(destination.with_suffix(".selection.json"), {
         "selection_method": "train_length_bin_sha256_ranking", "seed": seed,
-        "length_bin_quotas": BENCHMARK_QUOTAS,
+        "length_bin_quotas": quotas,
         "source_manifest_sha256": index.digest if index is not None else sha256_file(source_manifest),
         "selected_pair_ids": [r["pair_id"] for r in rows],
     })

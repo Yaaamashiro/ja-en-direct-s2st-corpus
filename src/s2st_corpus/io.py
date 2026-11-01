@@ -36,13 +36,17 @@ def file_size(path: Path) -> int:
 
 
 def account_replace(path: Path, previous_bytes: int) -> None:
-    resolved = path.resolve()
     new_size = file_size(path)
+    account_worker_write(path, previous_bytes, new_size, new_size)
+
+
+def account_worker_write(path, previous_bytes, new_size, written_bytes):
+    resolved = Path(path).resolve()
     delta = new_size - previous_bytes
     for root in _BUDGETS:
         if resolved.is_relative_to(root):
             _BUDGETS[root] += delta
-    metrics.add_time("current_run_written_bytes", new_size)
+    metrics.add_time("current_run_written_bytes", written_bytes)
 
 
 def directory_size(path: Path) -> int:

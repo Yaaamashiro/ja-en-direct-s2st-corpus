@@ -7,6 +7,7 @@ import platform
 import shutil
 import subprocess
 import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -156,6 +157,8 @@ def gpu_preflight(config: AppConfig) -> dict[str, Any]:
             return {"python": platform.python_version(), "torch": torch.__version__,
                     "gpu": None, "vram_gib": 0, "tts_dtype": "float32", "device": "cpu"}
     properties = torch.cuda.get_device_properties(0)
+    if config.device.target_gpu and config.device.target_gpu not in properties.name:
+        warnings.warn(f"Performance target: {config.device.target_gpu}; actual GPU: {properties.name}", RuntimeWarning)
     vram_gib = properties.total_memory / (1024**3)
     if vram_gib < config.device.minimum_vram_gib:
         raise RuntimeError(
@@ -170,6 +173,8 @@ def gpu_preflight(config: AppConfig) -> dict[str, Any]:
         "torch": torch.__version__,
         "cuda_runtime": torch.version.cuda,
         "gpu": properties.name,
+        "actual_gpu": properties.name,
+        "target_gpu": config.device.target_gpu,
         "vram_gib": round(vram_gib, 2),
         "bf16_supported": bf16_supported,
         "tts_dtype": str(_dtype(torch, config.tts.dtype)).removeprefix("torch."),
@@ -322,16 +327,22 @@ def _generate_attempt(
                 config.tts.output_sample_rate,
                 "PCM_16",
             )
+        duration = duration_seconds(canonical_path)
+        if config.tts.backend == "kokoro":
+            metrics.add_time("tts_generated_utterances", 1)
+            metrics.add_time("tts_generated_audio_seconds", duration)
         return {
             "attempt": attempt,
             "seed": seed,
             "generation_status": "ok",
             "wav_native": str(native_path) if native_path is not None else None,
             "wav_16k": str(canonical_path),
-            "duration": duration_seconds(canonical_path),
+            "duration": duration,
             "sha256": sha256_file(canonical_path),
             "tts_seconds": round(time.perf_counter() - started, 3),
             "synthesis_seconds": synthesis_seconds,
+            **({"worker_count": config.tts.worker_count, "worker_id": os.getpid(),
+                "voice": getattr(config.tts, f"{language}_voice")} if config.tts.backend == "kokoro" else {}),
         }
     except Exception as error:
         if _fatal_accelerator_error(error):
@@ -369,6 +380,12 @@ def _generate_missing(
         )
     }
     if not missing:
+        return
+    if config.tts.backend == "kokoro" and config.tts.batch_size != 1:
+        raise ValueError("Kokoro uses worker_count; batch_size must remain 1")
+    if config.tts.backend == "kokoro" and config.tts.worker_count > 1:
+        from .kokoro_parallel import generate_missing_parallel
+        generate_missing_parallel(config, shard_name, records, attempt, missing, checkpoint_path)
         return
     if config.tts.batch_size > 1:
         _generate_missing_batched(config, shard_name, records, attempt, missing, checkpoint_path)
@@ -651,6 +668,8 @@ def _qc_unchecked(
                     except Exception:
                         write_checkpoint(checkpoint_path, records)
                         raise
+                    if "metric" in attempt:
+                        metrics.add_time("asr_audio_seconds", float(attempt["duration"]))
                     changed += 1
                     print(
                         f"[qc] checked={changed} {record['pair_id']} {language} "
@@ -708,6 +727,7 @@ def _qc_batched(config, records, pending, checkpoint_path, g2p):
                     elapsed = round(time.perf_counter() - started, 3)
                     if len(outputs) != len(group):
                         raise RuntimeError("Whisper batch output count does not match inputs")
+                    metrics.add_time("asr_audio_seconds", sum(float(a["duration"]) for _, _, a in group))
                     for (record, lang, attempt), output in zip(group, outputs):
                         _evaluate_attempt(config, record, lang, attempt,
                                           lambda *args, result=output, **kwargs: result, processor, g2p)
@@ -795,7 +815,11 @@ def run_shard(config: AppConfig, shard_index: int) -> Path:
     provenance = ensure_identity(config)
     if not config.run.resume:
         raise ValueError("external runs require resume=true; use a new output_dir for fresh generation")
-    measurements = {"started_utc": datetime.now(timezone.utc).isoformat(), "shard": shard_index}
+    measurements = {"started_utc": datetime.now(timezone.utc).isoformat(), "shard": shard_index,
+                    "kokoro_worker_count": config.tts.worker_count,
+                    "asr_batch_size": config.asr.batch_size,
+                    "tts_generated_utterances": 0, "tts_generated_audio_seconds": 0,
+                    "asr_audio_seconds": 0, "target_gpu": config.device.target_gpu}
     try:
         repository = Path(__file__).resolve().parents[2]
         measurements["implementation_commit"] = subprocess.check_output(
@@ -811,12 +835,22 @@ def run_shard(config: AppConfig, shard_index: int) -> Path:
         result = _run_shard(config, shard_index, provenance)
         measurements["success"] = True
         return result
+    except BaseException as error:
+        measurements["error"] = f"{type(error).__name__}: {error}"
+        raise
     finally:
         metrics.ACTIVE.reset(token)
         measurements["full_pipeline_wall_seconds"] = time.perf_counter() - started
         measurements.setdefault("success", False)
         measurements["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
         measurements["peak_vram_gib"] = torch.cuda.max_memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
+        measurements["peak_allocated_vram_gib"] = measurements["peak_vram_gib"]
+        measurements["peak_reserved_vram_gib"] = torch.cuda.max_memory_reserved() / 1024**3 if torch.cuda.is_available() else 0
+        measurements["memory_scope"] = "parent process; see tts_worker_per_process_peak for TTS children"
+        measurements["gpu_utilization"] = None  # no high-frequency GPU polling in production
+        phase = measurements.get("tts_phase_seconds", 0)
+        measurements["tts_audio_seconds_per_wall_second"] = measurements["tts_generated_audio_seconds"] / phase if phase else None
+        measurements["tts_audio_hours_per_wall_hour"] = measurements["tts_audio_seconds_per_wall_second"]
         checkpoint = config.run.output_dir / "manifests" / "generated" / f"{_shard_name(shard_index, config.run.num_shards)}.jsonl"
         if checkpoint.is_file():
             measurements["checkpoint_metrics"] = metrics.summarize(list(read_jsonl(checkpoint)))
@@ -878,13 +912,15 @@ def _run_shard(config: AppConfig, shard_index: int, provenance=None) -> Path:
         for language in ("ja", "en")
     }
     phase_started = time.perf_counter()
-    _generate_missing(
-        config, shard_name, records, 0, initial_targets, checkpoint
-    )
-    metrics.add_time("tts_phase_seconds", time.perf_counter() - phase_started)
+    try:
+        _generate_missing(config, shard_name, records, 0, initial_targets, checkpoint)
+    finally:
+        metrics.add_time("tts_phase_seconds", time.perf_counter() - phase_started)
     phase_started = time.perf_counter()
-    _qc_unchecked(config, records, 0, checkpoint)
-    metrics.add_time("asr_phase_seconds", time.perf_counter() - phase_started)
+    try:
+        _qc_unchecked(config, records, 0, checkpoint)
+    finally:
+        metrics.add_time("asr_phase_seconds", time.perf_counter() - phase_started)
 
     if config.tts.max_content_retries:
         retry_targets = {

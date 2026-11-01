@@ -262,33 +262,61 @@ JParaCrawl v3 → jparacrawl-filtering → text corpus export
 
 ### Colabの手順
 
-専用ノートブックを上から実行します。T4を対象にCUDA必須・BF16不要にしており、T4の実測結果はsmokeで確認してください。Kokoro float32とWhisper float16を順番にロードするため、同時に両モデルでVRAMを埋める実装ではありません。Kokoroは1文ずつ生成し、ASRは既定8件バッチです。Qwen用の `S2ST_TTS_BATCH_SIZE` を引き継ぐと停止します。
+専用ノートブックはNVIDIA L4を本番targetとし、`production-kokoro-jparacrawl-l4.yaml` を使います。CUDA必須・最低VRAM 20 GiB・BF16不要です。L4以外はtarget/actual GPUのwarningを表示し、T4はVRAM条件で停止します。従来の `production-kokoro-jparacrawl.yaml` は残しています。Kokoro float32とWhisper float16を順番にロードします。初期値はKokoro worker=1・ASR batch=8です。Qwen用の `S2ST_TTS_BATCH_SIZE` を引き継ぐと停止します。
 
 1. Driveをmountし、専用checkoutで `feature/kokoro-tts` を取得します。
 2. Python 3.12の専用venvにTorch 2.7.1/cu126と固定依存を導入します。Colab本体のPythonには依存しません。`espeak-ng` とUniDic `3.1.0+2021-08-31` の辞書本体も導入します。
-3. Driveに保存する設定を作成・復元し、入力2ファイルを確認します。
+3. Driveに保存する `kokoro-jparacrawl-l4-config.yaml` を作成・復元し、入力2ファイルを確認します。
 4. 入力検証→GPU/容量確認→preload→任意のvoice試聴を実行します。
-5. **10件→100件のfull TTS＋Whisper QC**を実行し、ここで結果を確認します。1000件benchmarkは既定で無効です。
-6. 結果を確認して本番を実行する場合だけ、`APPROVE_PRODUCTION=True` にします。最初は次の1 shardです。全件実行にはさらに `RUN_ALL_REMAINING=True` が必要です。
+5. **10件→100件のfull TTS＋Whisper QC**で動作・音質を確認します。
+6. `RUN_L4_TUNING=True` にして固定200 pairのTTS worker比較→同じ音声のWhisper batch比較を実行します。初期状態はOFFです。
+7. recommendationとheadroom・品質差を確認し、worker/batchを手動で設定へ反映します。最適値はL4実測前には決めません。
+8. `PERFORMANCE_CONFIG_CONFIRMED=True` と `RUN_BENCHMARK_1000=True` にして、最終設定で1000件full benchmarkを1回実行します。初期状態はどちらもFalseです。
+9. 結果を確認して本番を実行する場合だけ、`APPROVE_PRODUCTION=True` にします。最初は次の1 shardです。全件実行にはさらに `RUN_ALL_REMAINING=True` が必要です。
 
 本番は自動では開始しません。CLIもexternal profileの生成コマンドには `--allow-production` が必要です。
 
 ```bash
-python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml prepare
-python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smoke-test --pairs 10
-python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smoke-test --pairs 100
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml prepare
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml smoke-test --pairs 10
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml smoke-test --pairs 100
 # 任意のbenchmark（結果を見てから）
-python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml smoke-test --pairs 1000
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml smoke-test --pairs 1000
 ```
 
-ノートブックでは `python` の代わりに専用venvの `PYTHON` を使い、設定はDrive上の `kokoro-jparacrawl-config.yaml` です。10件・100件smokeはexport順の先頭N件を使います。1000件benchmarkはtrainからlength-bin 0/1/2/3/4を20/150/400/330/100件ずつ、seed=42とpair_idのSHA256 rankingで選び、最後に元input順に戻します。必要件数が不足すれば停止します。`--benchmark-seed` でseedを指定できます。本文やsplitは変更しません。選択方法・seed・quota・元manifestのSHA256・選択IDは `input.selection.json` とrelease summaryに記録します。10件・100件・1000件はそれぞれ `kokoro-smoke/pairs-N/production/` に独立して保存します。以前の先頭1000件benchmarkを残している場合は新しいsmoke出力先を指定してください。
+ノートブックでは `python` の代わりに専用venvの `PYTHON` を使い、設定はDrive上の `kokoro-jparacrawl-l4-config.yaml` です。10件・100件smokeはexport順の先頭N件を使います。1000件benchmarkはtrainからlength-bin 0/1/2/3/4を20/150/400/330/100件ずつ、seed=42とpair_idのSHA256 rankingで選び、最後に元input順に戻します。必要件数が不足すれば停止します。`--benchmark-seed` でseedを指定できます。本文やsplitは変更しません。選択方法・seed・quota・元manifestのSHA256・選択IDは `input.selection.json` とrelease summaryに記録します。10件・100件・1000件はそれぞれ `kokoro-l4-smoke/pairs-N/production/` に独立して保存します。以前の先頭1000件benchmarkを残している場合は新しいsmoke出力先を指定してください。
+
+### L4 performance tuning
+
+```bash
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml benchmark-performance --stage tts
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml benchmark-performance --stage asr
+# 同一ランタイムで両方を順番に実行する場合
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml benchmark-performance --stage all
+```
+
+TTS tuningはtrainから固定seed=42で200 pair（bin別4/30/80/66/20件）を選び、同じtext/voiceでworker=1/2/4/6を比較します。音声は `/content/kokoro-l4-benchmark` のlocal SSDへ保存し、Drive上の `kokoro-performance/l4-performance.json` と日時付きsnapshot・logsへ結果を保存します。入力と音声のSHA256も記録します。`--local-dir` / `--report-dir` / `--workers 1 2 4 6` / `--asr-batches 8 16 24 32` で明示的に変更できます。8 workerは指定した場合のみ候補になります。TTS tuningを再実行すると新しいlocal runを作り、古い音声を使ったresume速度を測らないようにしています。
+
+Kokoroの並列数は `tts.worker_count` です。`tts.batch_size` は1のままにし、Qwenのbatch経路へ入りません。worker=1は既存の逐次経路、2以上は `multiprocessing.get_context('spawn')` の複数processです。親がモデル・voiceの固定assetを取得後、各workerはlocal assetからKModelを1回だけloadし、JA/EN pipelineを共有します。worker内のTorch CPU threadsは1です。dynamic queueでtaskを配り、各workerが24→16 kHz変換とatomic WAV保存まで行い、波形をIPC転送しません。
+
+親だけが完了metadataをrecordへ対応付け、100 utterance間隔でcheckpointを保存します。worker crashやCUDA fatal errorでは自動再起動せず、受信済みcheckpointを保存してCLIをfailure終了します。checkpointに記録されていないWAVはorphanとして再生成し、記録済みWAVのSHA256等の検証を緩めません。全TTS workerを終了・joinしてからWhisperをloadし、TTS/ASRをGPU上でoverlapさせません。
+
+Whisper tuningはTTS tuningで作った同じ音声を使い、batch=8/16/24/32をそれぞれ新しいspawn subprocessで実行します。OOM候補は `status: oom` として記録し、そのprocess終了後に次を試します。音声がランタイム消去で失われた場合はTTS tuningから再実行してください。ASR model/processorは親が固定revisionを取得し、候補側はoffline cacheを使います。
+
+推奨値は `audio_seconds / wall_seconds` 最大の成功候補から計算します。headroom警告（総VRAMの90%超）・生成失敗・品質差がある候補は除外します。TTSはtext/voiceと大きなduration差（0.25秒または5%超）を比較し、Whisperは同じ音声のASR text・metric・QC判定を比較します。metric/QCが変わったASR候補は推奨しません。実worker数によるASR品質差のL4確認は未実施なので、microbenchmarkだけで本番へ進まず、選択設定で1000件full benchmarkを実行してください。
+
+VRAMはworkerごとのallocated/reserved peak・合計参考値・最大worker値を明示します。合計参考値は同時刻のGPU全体peakではなく、CUDA context等も含みません。benchmark時だけ約5秒間隔のnvidia-smiでGPU全体の使用量もサンプルし、瞬間的なpeakを捕捉できない可能性を残した上でreferenceと併用します。productionでは大量pollingを行わず、`gpu_utilization` は未取得（null）です。benchmarkのRTF/wallにはmodel load・worker startup・local WAV I/Oを含み、従来のattempt別TTS RTF（推論時間）とは区別します。
+
+reportの `recommended_tts_workers` / `recommended_asr_batch_size` は候補値で、**production configを自動変更しません**。L4実測前の初期値はworker=1 / ASR batch=8のままです。worker_countは音声identityから分離し、新規runのprovenanceには `initial_performance.kokoro_worker_count`、各invocationには実際のworker数・ASR batch・phase throughput・VRAMを記録します。worker_countだけの変更では正常checkpointの音声を無効化しません。ASR batchは従来のprovenance条件に含むため、同じ保存先で変更すると不一致になります。最終設定で独立した1000件benchmarkを通し、本番開始後はworker/batchを固定してください。既存のprovenanceファイルは書き換えません。performance-lockは今回追加していません。
+
+詳しい実装範囲と未実施項目は [L4実装レポート](docs/kokoro-l4-report.md) を参照してください。
 
 ### Voiceと再現性
 
 既定は日本語 `jf_alpha`、英語 `af_heart`、speed=1.0。日英で同一人物を表す設定ではありません。公式 `kokoro==0.9.4` とモデルrevision `f3ff3571791e39611d31c381e3a41a3af07b4987` を固定しています。voice tensorも同じrevisionから取得します。1つのKModelを日英KPipelineで共有し、空チャンクを除く全チャンクを順番に連結します。全チャンクが空ならgeneration failureです。
 
 ```bash
-python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml voice-samples --output-dir /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-voice-samples --en-voices af_heart af_bella am_adam
+python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml voice-samples --output-dir /content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-voice-samples --en-voices af_heart af_bella am_adam
 ```
 
 日本語はjf_alpha・jf_gongitsune・jf_nezumi・jf_tebukuro・jm_kumoを固定文で試聴できます。試聴は本番データとは別です。configのvoiceを確定してからsmokeを開始してください。同じ出力先でvoice・speed・モデル・入力・QC等を変更すると `provenance mismatch` で停止します。設定を元に戻すか、新しい出力先を指定してください。
@@ -297,11 +325,11 @@ python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl.yaml voi
 
 ```text
 MyDrive/ja-en-direct-s2st-corpus/
-├── kokoro-jparacrawl-config.yaml
+├── kokoro-jparacrawl-l4-config.yaml
 ├── kokoro-logs/                    # リアルタイム実行ログ
 ├── kokoro-environment/             # pip freezeと実装commit
-├── kokoro-smoke/pairs-{10,100,1000}/production/
-└── kokoro-jparacrawl/              # 本番（Qwenとは別）
+├── kokoro-l4-smoke/pairs-{10,100,1000}/production/
+└── kokoro-jparacrawl-l4/           # L4本番（Qwen・従来profileとは別）
     ├── provenance.json
     ├── audio/16k/{ja,en}/shard-.../*.a0.wav
     ├── manifests/generated/       # 途中checkpoint

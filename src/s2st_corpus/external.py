@@ -91,9 +91,11 @@ def run_identity(config: AppConfig) -> dict:
     from .input_index import get_index
     validation = validate_external(config)
     index = get_index(config.run.input_jsonl, config.run.num_shards)
+    tts_identity = asdict(config.tts)
+    tts_identity.pop("worker_count", None)  # performance condition, not audio identity
     key = (_validation_key(config), str(config.run.input_jsonl.resolve()),
            config.run.num_shards, config.run.save_native,
-           json.dumps([asdict(config.tts), asdict(config.qc), asdict(config.asr)], sort_keys=True))
+           json.dumps([tts_identity, asdict(config.qc), asdict(config.asr)], sort_keys=True))
     if key in _IDENTITIES:
         if index.digest != _IDENTITIES[key]["run_input_sha256"]:
             raise ValueError("run input differs from validated snapshot")
@@ -110,7 +112,7 @@ def run_identity(config: AppConfig) -> dict:
                 raise ValueError("smoke input differs from exported record")
         source.check()
         index.check()
-    identity = {"input": validation, "tts": asdict(config.tts),
+    identity = {"input": validation, "tts": tts_identity,
                 "qc": asdict(config.qc), "asr": asdict(config.asr),
                 "num_shards": config.run.num_shards, "save_native": config.run.save_native,
                 "run_input_sha256": index.digest}
@@ -138,11 +140,16 @@ def ensure_identity(config: AppConfig) -> dict:
     identity = run_identity(config)
     path = config.run.output_dir / "provenance.json"
     if path.is_file():
-        if json.loads(path.read_text(encoding="utf-8")) != identity:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        semantic = {k: v for k, v in saved.items() if k != "initial_performance"}
+        if semantic != identity:
             raise RuntimeError("output provenance mismatch; restore the original config or choose a new output_dir")
+        return saved
     else:
         if any((config.run.output_dir / d).exists() for d in ("audio", "manifests")):
             raise RuntimeError("existing output has no provenance; use a separate output_dir")
+        if config.tts.backend == "kokoro":
+            identity = {**identity, "initial_performance": {"kokoro_worker_count": config.tts.worker_count}}
         write_json(path, identity)
     return identity
 

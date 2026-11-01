@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,7 @@ class DeviceConfig:
     minimum_vram_gib: float
     require_bf16: bool
     attention: str
+    target_gpu: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,15 @@ class KokoroConfig:
     backend: str = "kokoro"
     dtype: str = "float32"
     package_version: str = "0.9.4"
+    worker_count: int = 1
+
+
+@dataclass(frozen=True)
+class PerformanceConfig:
+    kokoro_worker_candidates: tuple[int, ...] = (1, 2, 4, 6)
+    asr_batch_candidates: tuple[int, ...] = (8, 16, 24, 32)
+    local_output_dir: Path = Path("/content/kokoro-l4-benchmark")
+    report_dir: Path = Path("/content/drive/MyDrive/ja-en-direct-s2st-corpus/kokoro-performance")
 
 
 @dataclass(frozen=True)
@@ -149,6 +159,7 @@ class AppConfig:
     tts: TTSConfig | KokoroConfig
     asr: ASRConfig
     qc: QCConfig
+    performance: PerformanceConfig = field(default_factory=PerformanceConfig)
 
 
 def _mapping(value: Any, name: str) -> dict[str, Any]:
@@ -198,6 +209,19 @@ def load_config(path: Path) -> AppConfig:
     tts = (KokoroConfig if backend == "kokoro" else TTSConfig)(**tts_values)
     asr = ASRConfig(**asr_values)
     qc = QCConfig(**_mapping(raw.get("qc"), "qc"))
+    performance_values = _mapping(raw.get("performance", {}), "performance").copy()
+    for key in ("kokoro_worker_candidates", "asr_batch_candidates"):
+        if key in performance_values:
+            performance_values[key] = tuple(performance_values[key])
+    for key in ("local_output_dir", "report_dir"):
+        if key in performance_values:
+            performance_values[key] = _path(performance_values[key])
+    performance = PerformanceConfig(**performance_values)
+    for candidates in (performance.kokoro_worker_candidates, performance.asr_batch_candidates):
+        if not candidates or len(set(candidates)) != len(candidates) or any(type(n) is not int or n < 1 for n in candidates):
+            raise ValueError("performance candidates must be unique positive integers")
+    if any(n > 8 for n in performance.kokoro_worker_candidates):
+        raise ValueError("at most 8 Kokoro workers are supported")
 
     if run.num_shards < 1:
         raise ValueError("run.num_shards must be positive")
@@ -224,6 +248,8 @@ def load_config(path: Path) -> AppConfig:
     else:
         _validate_legacy_prepare(prepare)
     if backend == "kokoro":
+        if type(tts.worker_count) is not int or not 1 <= tts.worker_count <= 8:
+            raise ValueError("tts.worker_count must be an integer between 1 and 8")
         if not external:
             raise ValueError("Kokoro profile requires external_manifest")
         if tts.device not in {"auto", "cpu", "cuda", "cuda:0"}:
@@ -279,7 +305,7 @@ def load_config(path: Path) -> AppConfig:
         raise ValueError("QC error-rate thresholds must be between 0 and 1")
     if qc.min_duration_seconds >= qc.max_duration_seconds:
         raise ValueError("invalid QC duration range")
-    return AppConfig(run, prepare, sources, smoke, device, tts, asr, qc)
+    return AppConfig(run, prepare, sources, smoke, device, tts, asr, qc, performance)
 
 
 def _validate_legacy_prepare(prepare: PrepareConfig) -> None:

@@ -53,8 +53,16 @@ def download_assets(config, voices=None):
         local_dir=local, allow_patterns=["config.json", "kokoro-v1_0.pth", *[f"voices/{v}.pt" for v in voices]]))
 
 
+def materialize_assets(config):
+    root = download_assets(config)
+    for name in ("config.json", "kokoro-v1_0.pth", f"voices/{config.ja_voice}.pt", f"voices/{config.en_voice}.pt"):
+        if not (root / name).is_file() or (root / name).stat().st_size == 0:
+            raise RuntimeError(f"missing Kokoro asset: {root / name}")
+    return root
+
+
 class KokoroBackend:
-    def __init__(self, config):
+    def __init__(self, config, asset_root=None, local_only=False, preload_voices=False):
         import torch
         from kokoro import KModel, KPipeline
         if version("kokoro") != config.package_version:
@@ -64,21 +72,36 @@ class KokoroBackend:
         self.config = config
         self.torch = torch
         self.device = resolve_device(config.device, torch)
-        self.root = download_assets(config)
+        self.local_only = local_only
+        self.root = Path(asset_root) if asset_root is not None else download_assets(config)
+        if local_only and asset_root is None:
+            raise ValueError("local-only Kokoro requires asset_root")
+        if local_only:
+            from importlib.util import find_spec
+            if find_spec("en_core_web_sm") is None:
+                raise RuntimeError("install the pinned en_core_web_sm package before spawning Kokoro workers")
         self.model = KModel(repo_id=config.model_id, config=str(self.root / "config.json"),
                             model=str(self.root / "kokoro-v1_0.pth")).to(self.device).eval()
         self.pipelines = {lang: KPipeline(lang_code=code, repo_id=config.model_id, model=self.model)
                           for lang, code in (("ja", "j"), ("en", "a"))}
         self.voices = {}
+        if preload_voices:
+            for voice in (config.ja_voice, config.en_voice):
+                self._load_voice(voice)
         self.load_seconds = time.perf_counter() - started
+
+    def _load_voice(self, voice):
+        path = self.root / "voices" / f"{voice}.pt"
+        if not path.is_file():
+            if self.local_only:
+                raise FileNotFoundError(f"local voice asset missing: {path}")
+            path = download_assets(self.config, [voice]) / "voices" / f"{voice}.pt"
+        self.voices[voice] = self.torch.load(str(path), map_location="cpu", weights_only=True)
 
     def generate(self, text, language, voice=None):
         voice = voice or getattr(self.config, f"{language}_voice")
         if voice not in self.voices:
-            path = self.root / "voices" / f"{voice}.pt"
-            if not path.is_file():
-                path = download_assets(self.config, [voice]) / "voices" / f"{voice}.pt"
-            self.voices[voice] = self.torch.load(str(path), map_location="cpu", weights_only=True)
+            self._load_voice(voice)
         chunks = []
         with self.torch.inference_mode():
             for result in self.pipelines[language](text, voice=self.voices[voice], speed=self.config.speed):

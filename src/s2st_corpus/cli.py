@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     smoke.add_argument("--pairs", type=int)
     smoke.add_argument("--benchmark-seed", type=int, default=42)
+    performance = commands.add_parser("benchmark-performance", help="Isolated TTS-worker / Whisper-batch tuning; never starts production.")
+    performance.add_argument("--stage", choices=["tts", "asr", "all"], default="all")
+    performance.add_argument("--local-dir", type=Path)
+    performance.add_argument("--report-dir", type=Path)
+    performance.add_argument("--workers", nargs="+", type=int)
+    performance.add_argument("--asr-batches", nargs="+", type=int)
     commands.add_parser("preflight", help="Check storage and GPU without loading models.")
     commands.add_parser("preload", help="Load pinned Kokoro and G2P, then exit.")
     voices = commands.add_parser("voice-samples", help="Audition voices using fixed sentences outside production.")
@@ -82,7 +88,10 @@ def main() -> None:
                 input_jsonl=root / "input.jsonl", output_dir=root / "production"))
     if is_external(config) and args.command in {"build", "run-shard", "run-next-shard", "run-remaining-shards"} and not args.allow_production:
         raise RuntimeError("Review 10/100-pair smoke reports first; production requires --allow-production before the command")
-    if args.command == "preflight":
+    if args.command == "benchmark-performance":
+        from .performance import benchmark_performance
+        result = benchmark_performance(config, args.stage, args.local_dir, args.report_dir, args.workers, args.asr_batches)
+    elif args.command == "preflight":
         from .runner import gpu_preflight
         result = gpu_preflight(config)
     elif args.command == "preload":
