@@ -284,7 +284,7 @@ python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml 
 python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml smoke-test --pairs 1000
 ```
 
-ノートブックでは `python` の代わりに専用venvの `PYTHON` を使い、設定はDrive上の `kokoro-jparacrawl-l4-config.yaml` です。10件・100件smokeはexport順の先頭N件を使います。1000件benchmarkはtrainからlength-bin 0/1/2/3/4を20/150/400/330/100件ずつ、seed=42とpair_idのSHA256 rankingで選び、最後に元input順に戻します。必要件数が不足すれば停止します。`--benchmark-seed` でseedを指定できます。本文やsplitは変更しません。選択方法・seed・quota・元manifestのSHA256・選択IDは `input.selection.json` とrelease summaryに記録します。10件・100件・1000件はそれぞれ `kokoro-l4-smoke/pairs-N/production/` に独立して保存します。以前の先頭1000件benchmarkを残している場合は新しいsmoke出力先を指定してください。
+ノートブックでは `python` の代わりに専用venvの `PYTHON` を使い、設定はDrive上の `kokoro-jparacrawl-l4-config.yaml` です。10件・100件smokeはexport順の先頭N件を使います。1000件benchmarkはtrainからlength-bin 0/1/2/3/4を20/150/400/330/100件ずつ、seed=42とpair_idのSHA256 rankingで選び、最後に元input順に戻します。既定では区分ごとの必要件数が不足すると、入力パス・不足区分・train実件数を表示して停止します。`--benchmark-shortfall redistribute` を明示すると、不足区分を実件数まで減らし、不足分を他の区分へ元のquota比率と最大剰余法（同率はbin ID順）で再配分し、総数1000件を維持します。train全体の対象件数が不足する場合は再配分でも停止します。`--benchmark-seed` でseedを指定できます。本文やsplitは変更しません。選択方法・seed・quota・元manifestのSHA256・選択IDは `input.selection.json` とrelease summaryに記録します。10件・100件・1000件はそれぞれ `kokoro-l4-smoke/pairs-N/production/` に独立して保存します。以前の先頭1000件benchmarkを残している場合は新しいsmoke出力先を指定してください。
 
 ### L4 performance tuning
 
@@ -295,7 +295,7 @@ python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml 
 python -m s2st_corpus.cli --config configs/production-kokoro-jparacrawl-l4.yaml benchmark-performance --stage all
 ```
 
-TTS tuningはtrainから固定seed=42で200 pair（bin別4/30/80/66/20件）を選び、同じtext/voiceでworker=1/2/4/6を比較します。音声は `/content/kokoro-l4-benchmark` のlocal SSDへ保存し、Drive上の `kokoro-performance/l4-performance.json` と日時付きsnapshot・logsへ結果を保存します。入力と音声のSHA256も記録します。`--local-dir` / `--report-dir` / `--workers 1 2 4 6` / `--asr-batches 8 16 24 32` で明示的に変更できます。8 workerは指定した場合のみ候補になります。TTS tuningを再実行すると新しいlocal runを作り、古い音声を使ったresume速度を測らないようにしています。
+TTS tuningはtrainから固定seed=42で200 pair（希望配分はbin別4/30/80/66/20件）を選びます。区分ごとの件数が足りない場合は上記の再配分で200件を維持し、希望配分・実配分・train実件数・policyをログとselectionに記録します。存在しない短文を生成したり、同じpairを重複抽出したりはしません。この200 pairを共通の入力として、同じtext/voiceでworker=1/2/4/6を比較します。音声は `/content/kokoro-l4-benchmark` のlocal SSDへ保存し、Drive上の `kokoro-performance/l4-performance.json` と日時付きsnapshot・logsへ結果を保存します。入力と音声のSHA256も記録します。`--local-dir` / `--report-dir` / `--workers 1 2 4 6` / `--asr-batches 8 16 24 32` で明示的に変更できます。8 workerは指定した場合のみ候補になります。TTS tuningを再実行すると新しいlocal runを作り、古い音声を使ったresume速度を測らないようにしています。
 
 Kokoroの並列数は `tts.worker_count` です。`tts.batch_size` は1のままにし、Qwenのbatch経路へ入りません。worker=1は既存の逐次経路、2以上は `multiprocessing.get_context('spawn')` の複数processです。親がモデル・voiceの固定assetを取得後、各workerはlocal assetからKModelを1回だけloadし、JA/EN pipelineを共有します。worker内のTorch CPU threadsは1です。文字数は処理時間の近似で、本文自体は変更しません。Unicode文字数の長いutteranceから先に並べ、同じ長さはpair_id/language/attemptで順序を固定してdynamic queueへ配り、各workerが24→16 kHz変換とatomic WAV保存まで行い、波形をIPC転送しません。
 

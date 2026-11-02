@@ -43,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     smoke.add_argument("--pairs", type=int)
     smoke.add_argument("--benchmark-seed", type=int, default=42)
+    smoke.add_argument("--benchmark-shortfall", choices=["error", "redistribute"], default="error",
+                       help="1000-pair external benchmark: reject bin shortages (default), or redistribute while preserving total size.")
     performance = commands.add_parser("benchmark-performance", help="Isolated TTS-worker / Whisper-batch tuning; never starts production.")
     performance.add_argument("--stage", choices=["tts", "asr", "all"], default="all")
     performance.add_argument("--local-dir", type=Path)
@@ -142,6 +144,7 @@ def main() -> None:
             config.smoke.pair_count,
             external=is_external(config),
             benchmark_seed=args.benchmark_seed,
+            benchmark_shortfall=args.benchmark_shortfall,
         )
         smoke_config = smoke_app_config(config)
         planning = plan(smoke_config)

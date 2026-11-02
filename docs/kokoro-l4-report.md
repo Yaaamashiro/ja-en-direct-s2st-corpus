@@ -107,3 +107,11 @@ max_pairs_per_shard: 3000
 - 300k production
 
 上記を実測してから本番へ進みます。input index、export text、train/dev split、voice/revision、QC閾値、0.7〜30秒のduration条件、WAV integrity、streaming release、canonical orderは維持しています。
+
+## Length-bin shortfall handling
+
+- L4実行時のexport summaryではtrain bin 0が1件で、TTS希望quotaの4件に届かないため抽出時に停止した。GPU・モデルload以前の問題。
+- TTS tuningは不足分を決定的に再配分し、総数200件・train限定・同一候補間の同一sample・入力順・本文の保持を維持する。
+- 1000件smokeはCLI既定ではstrictのまま。`--benchmark-shortfall redistribute` の明示指定で同じ再配分を使える。Notebookでは指定と意味を表示する。
+- 希望quota・実quota・利用可能train件数・policyをselection metadataに保存する。総件数自体が不足する場合は停止し、既存のsampleを上書きしない。
+- 修正後のローカル検証：`pytest -q --basetemp=.venv/test-quota-shortfall-full-01` は130 passed（既存のtar展開DeprecationWarning 2件）。L4実機への適用・再測定は未実施。

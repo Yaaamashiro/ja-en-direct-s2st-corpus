@@ -266,7 +266,8 @@ def benchmark_performance(config, stage="all", local_dir=None, report_dir=None, 
                   input_validation=validation, implementation_commit=current_commit)
     if stage in {"tts", "all"}:
         sample = workspace / "sample.jsonl"
-        rows = select_benchmark_pairs(config.run.input_jsonl, sample, seed=42, quotas=TUNING_QUOTAS)
+        rows = select_benchmark_pairs(config.run.input_jsonl, sample, seed=42, quotas=TUNING_QUOTAS,
+                                      shortfall_policy="redistribute")
         materialize_assets(config.tts)
         report.update(sample_manifest_sha256=sha256_file(sample), selection=json.loads(sample.with_suffix(".selection.json").read_text()),
                       length_bin_distribution=dict(Counter(str(r["length_bin"]) for r in rows)), tts_candidates=[], asr_candidates=[])

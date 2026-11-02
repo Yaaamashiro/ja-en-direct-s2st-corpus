@@ -122,8 +122,63 @@ def test_benchmark_stratification_reproducibility_exact_text(tmp_path):
 def test_benchmark_fails_when_training_quota_unavailable(tmp_path):
     path = tmp_path / "tiny.jsonl"
     write_checkpoint(path, [{"pair_id": "tiny", "split": "train", "corpus": "jparacrawl_v3_filtered", "length_bin": 0, "ja_text": "文", "en_text": "text"}])
-    with pytest.raises(ValueError, match="quotas"):
+    with pytest.raises(ValueError, match="quotas") as error:
         select_benchmark_pairs(path, tmp_path / "benchmark.jsonl")
+    assert str(path) in str(error.value)
+    assert "'requested': 20, 'available': 1" in str(error.value)
+    assert "train_length_bin_counts={0: 1}" in str(error.value)
+    assert not (tmp_path / "benchmark.jsonl").exists()
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_benchmark_redistributes_scarce_bin_preserving_size_order_and_text(tmp_path, indexed):
+    from s2st_corpus.input_index import get_index, reset_indexes
+    from s2st_corpus.smoke import select_smoke_pairs
+    source, destination = tmp_path / "source.jsonl", tmp_path / "sample.jsonl"
+    rows = [{"pair_id": f"b{b}-{i}", "split": "train", "corpus": "jparacrawl_v3_filtered",
+             "length_bin": b, "ja_text": f"Ａ　変更しない{i}", "en_text": f"Exact  text {i}"}
+            for i in range(500) for b in reversed(range(5)) if b != 0 or i == 0]
+    rows += [{**rows[0], "pair_id": f"dev-{i}", "split": "dev", "length_bin": 0} for i in range(30)]
+    write_checkpoint(source, rows)
+    if indexed:
+        get_index(source, 128)
+    try:
+        selected = select_smoke_pairs(source, destination, 1000, external=True,
+                                      benchmark_shortfall="redistribute")
+        assert len(selected) == len({r['pair_id'] for r in selected}) == 1000
+        chosen = {r['pair_id'] for r in selected}
+        assert selected == [r for r in rows if r['pair_id'] in chosen]
+        assert all(r['split'] == 'train' for r in selected)
+        meta = json.loads(destination.with_suffix('.selection.json').read_text())
+        assert meta['length_bin_quotas'] == {'0': 1, '1': 153, '2': 408, '3': 336, '4': 102}
+        assert meta['requested_length_bin_quotas'] == {str(b): n for b, n in BENCHMARK_QUOTAS.items()}
+        assert meta['available_train_length_bin_counts']['0'] == 1
+        assert meta['shortfall_policy'] == 'redistribute'
+        before = destination.read_bytes(), destination.with_suffix('.selection.json').read_bytes()
+        assert select_benchmark_pairs(source, destination, shortfall_policy='redistribute') == selected
+        assert before == (destination.read_bytes(), destination.with_suffix('.selection.json').read_bytes())
+    finally:
+        reset_indexes()
+
+
+def test_benchmark_redistribution_handles_multiple_capped_bins_and_refuses_small_input(tmp_path):
+    source, destination = tmp_path / 'source.jsonl', tmp_path / 'sample.jsonl'
+    rows = [{"pair_id": f"p{i}", "split": "train", "corpus": "jparacrawl_v3_filtered",
+             "length_bin": 2, "ja_text": '文', "en_text": 'text'} for i in range(5)]
+    write_checkpoint(source, rows)
+    selected = select_benchmark_pairs(source, destination, quotas={0: 2, 1: 2, 2: 1}, shortfall_policy='redistribute')
+    assert selected == rows
+    before = destination.read_bytes(), destination.with_suffix('.selection.json').read_bytes()
+    with pytest.raises(ValueError, match='requested_total=6'):
+        select_benchmark_pairs(source, destination, quotas={0: 2, 1: 2, 2: 2}, shortfall_policy='redistribute')
+    assert before == (destination.read_bytes(), destination.with_suffix('.selection.json').read_bytes())
+
+
+def test_benchmark_cli_redistribution_requires_explicit_opt_in():
+    from s2st_corpus.cli import build_parser
+    parser = build_parser()
+    assert parser.parse_args(['smoke-test', '--pairs', '1000']).benchmark_shortfall == 'error'
+    assert parser.parse_args(['smoke-test', '--pairs', '1000', '--benchmark-shortfall', 'redistribute']).benchmark_shortfall == 'redistribute'
 
 
 def test_duration_failures_by_language_and_bin():

@@ -97,10 +97,11 @@ def test_candidate_subprocess_isolation_and_oom(profile, tmp_path, monkeypatch):
     assert contexts == ["spawn", "spawn"] and len(processes) == 2
 
 
-def test_full_candidate_iteration_same_sample_audio_and_report(profile, tmp_path, monkeypatch):
+@pytest.mark.parametrize("scarce_bin", [False, True])
+def test_full_candidate_iteration_same_sample_audio_and_report(profile, tmp_path, monkeypatch, scarce_bin):
     c = profile
     rows = [{"pair_id":f"b{b}-{i}", "corpus":"jparacrawl_v3_filtered", "split":"train", "length_bin":b,
-             "ja_text":f"Ａ　そのまま{i}", "en_text":f"Exact  text {i}"} for b in range(5) for i in range(100)]
+             "ja_text":f"Ａ　そのまま{i}", "en_text":f"Exact  text {i}"} for b in range(5) for i in range(1 if scarce_bin and b == 0 else 100)]
     write_checkpoint(c.run.input_jsonl, rows)
     monkeypatch.setattr(perf, "validate_external", lambda c: {})
     monkeypatch.setattr(perf, "verify_inputs", lambda c: None)
@@ -139,7 +140,9 @@ def test_full_candidate_iteration_same_sample_audio_and_report(profile, tmp_path
     assert len(sample_hashes) == 4 and len(set(sample_hashes)) == 1
     assert batch_calls == [8,32,16,24] and len(set(audio_sources)) == 1
     assert report["recommended_tts_workers"] == 4 and report["recommended_asr_batch_size"] == 24
-    assert report["selection"]["length_bin_quotas"] == {str(k):v for k,v in perf.TUNING_QUOTAS.items()}
+    expected = {0: 1, 1: 31, 2: 81, 3: 67, 4: 20} if scarce_bin else perf.TUNING_QUOTAS
+    assert report["selection"]["length_bin_quotas"] == {str(k):v for k,v in expected.items()}
+    assert report["selection"]["requested_length_bin_quotas"] == {str(k):v for k,v in perf.TUNING_QUOTAS.items()}
     assert asdict(c) == before and report["production_config_modified"] is False
     saved = json.loads((tmp_path / "reports/l4-performance.json").read_text(encoding="utf-8"))
     assert saved["asr_candidates"][1]["status"] == "oom"
