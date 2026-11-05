@@ -5,9 +5,9 @@
 | Profile | 入力 | TTS | Colab |
 | --- | --- | --- | --- |
 | Legacy / original | JESC・KFTT | Qwen3-TTS / Ono_Anna | `notebooks/colab_pro.ipynb` |
-| New Kokoro + JParaCrawl | 検証済みtext corpus export | Kokoro-82M / jf_alpha・af_heart | [専用ノートブック](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/feature/kokoro-tts/notebooks/colab_kokoro_jparacrawl.ipynb) |
+| Kokoro + JParaCrawl | 検証済みtext corpus export | Kokoro-82M / jf_alpha・af_heart | [専用ノートブック](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/main/notebooks/colab_kokoro_jparacrawl.ipynb) |
 
-Kokoro版は `feature/kokoro-tts` ブランチです。[新profileの手順](#new-kokoro--jparacrawl-profile)を参照してください。以下の従来手順はQwen用です。
+Kokoro版とQwen版は `main` ブランチにあります。Kokoro版は [専用profileの手順](#new-kokoro--jparacrawl-profile) を参照してください。以下の従来手順はQwen用です。
 
 ## Legacy / original profile
 
@@ -264,7 +264,7 @@ JParaCrawl v3 → jparacrawl-filtering → text corpus export
 
 専用ノートブックはNVIDIA L4を本番targetとし、`production-kokoro-jparacrawl-l4.yaml` を使います。CUDA必須・最低VRAM 20 GiB・BF16不要です。L4以外はtarget/actual GPUのwarningを表示し、T4はVRAM条件で停止します。従来の `production-kokoro-jparacrawl.yaml` は残しています。Kokoro float32とWhisper float16を順番にロードします。初期値はKokoro worker=1・ASR batch=8です。Qwen用の `S2ST_TTS_BATCH_SIZE` を引き継ぐと停止します。
 
-1. Driveをmountし、専用checkoutで `feature/kokoro-tts` を取得します。
+1. Driveをmountし、専用checkoutで `main` を取得します。
 2. Python 3.12の専用venvにTorch 2.7.1/cu126と固定依存を導入します。Colab本体のPythonには依存しません。`espeak-ng` とUniDic `3.1.0+2021-08-31` の辞書本体も導入します。
 3. Driveに保存する `kokoro-jparacrawl-l4-config.yaml` を作成・復元し、入力2ファイルを確認します。
 4. 入力検証→GPU/容量確認→preload→任意のvoice試聴を実行します。
@@ -362,6 +362,8 @@ summaryの `checkpoint_writes` / `checkpoint_write_seconds`、`directory_scan_co
 RTF = TTS推論wall秒 / 生成音声秒。モデルload・WAV変換/保存はRTFから除き、`invocations` の `tts_load_seconds`、`asr_load_seconds`、各phase時間、`full_pipeline_wall_seconds` で別に確認します。GPUとPyTorchのpeak allocated VRAMも実行単位で保存します。pairs/secと音声時間/wall時間は成功・失敗した保存済みinvocationの累積wall時間を使います。**強制切断でfinallyまで実行されなかったinvocationはwall計測が残らず、速度が過大に見えることがあります。CU見積もりには切断なしの新しいbenchmarkを使ってください。** 実行ログのCU差分とwall時間から消費率を計算し、RTFだけからCUを断定しないでください。
 
 本番完了後の `consolidate` は全shardと音声の整合性を確認します。`complete: true` / `missing_shards: []` を確認してください。途中集計だけなら `consolidate --allow-incomplete` を明示します。
+
+外部manifestを使う実行では、`consolidate --audio-verification inventory` で、shard単位のファイル一覧と保存済みQCを照合して書き出せます。WAVの存在は確認し、内容・形式・SHA256の再検証は省きます。結果の `summary.json` に `audio_verification: inventory` を記録します。WAVの内容まで確認する場合は、既定の `full` を使います。集計はGPUを必要としません。
 
 ### 検証
 

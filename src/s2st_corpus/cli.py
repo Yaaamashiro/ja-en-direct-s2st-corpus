@@ -70,6 +70,8 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("run-remaining-shards", help="Run all unfinished shards sequentially, then consolidate.")
     merge = commands.add_parser("consolidate", help="Build release manifests.")
     merge.add_argument("--allow-incomplete", action="store_true")
+    merge.add_argument("--audio-verification", choices=["full", "inventory"], default="full",
+                       help="External profiles: inventory checks file presence and QC records without reopening WAVs.")
     return parser
 
 
@@ -215,7 +217,8 @@ def main() -> None:
         result.update(completed_shards=len(completed), remaining_shards=len(remaining),
                       next_shard=remaining[0] if remaining else None)
     else:
-        result = consolidate(config, allow_incomplete=args.allow_incomplete)
+        result = consolidate(config, allow_incomplete=args.allow_incomplete,
+                             audio_verification=args.audio_verification)
     if is_external(config) and args.command in {"run-shard", "run-next-shard"}:
         verify_inputs(config)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))

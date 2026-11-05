@@ -1002,6 +1002,7 @@ def recheck_shard(config: AppConfig, shard_index: int) -> Path:
     return final_path
 
 
-def consolidate(config: AppConfig, allow_incomplete: bool = False) -> dict[str, Any]:
+def consolidate(config: AppConfig, allow_incomplete: bool = False, *,
+                audio_verification: str = "full") -> dict[str, Any]:
     from .release import consolidate as publish_release
-    return publish_release(config, allow_incomplete=allow_incomplete)
+    return publish_release(config, allow_incomplete=allow_incomplete, audio_verification=audio_verification)

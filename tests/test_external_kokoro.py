@@ -251,7 +251,7 @@ def test_resume_rejects_changed_checkpoint_text(profile):
         validate_records(c, [rows[0]], [record], identity)
 
 
-@pytest.mark.parametrize("corruption", ["provenance", "text", "selected_audio", "duration", "wav", "incomplete"])
+@pytest.mark.parametrize("corruption", ["provenance", "text", "selected_audio", "duration", "wav", "missing_wav", "incomplete"])
 def test_streaming_release_preserves_external_integrity(profile, monkeypatch, corruption):
     c, pairs = profile
     identity = external.ensure_identity(c)
@@ -272,14 +272,25 @@ def test_streaming_release_preserves_external_integrity(profile, monkeypatch, co
     assert runner.consolidate(c)["complete"]
     marker = c.run.output_dir / "manifests/releases/summary.json"
     old = marker.read_bytes()
+    accepted_before = marker.with_name("accepted.jsonl").read_bytes()
     if corruption == "provenance": records[0]["provenance"] = {}
     elif corruption == "text": records[0]["ja_text"] = "changed"
     elif corruption == "selected_audio": records[0]["ja_wav_16k"] = "wrong.wav"
     elif corruption == "duration": records[0]["attempts"]["ja"][0]["duration"] = 5.0
     elif corruption == "wav": Path(records[0]["ja_wav_16k"]).write_bytes(b"broken")
+    elif corruption == "missing_wav": Path(records[0]["ja_wav_16k"]).unlink()
     elif corruption == "incomplete": records.pop()
     write_checkpoint(path, records)
     with pytest.raises(RuntimeError):
         runner.consolidate(c)
     # Validation failure must not replace the prior release marker.
     assert marker.read_bytes() == old
+    if corruption == "wav":
+        # Inventory deliberately trusts the previously recorded WAV contents.
+        summary = runner.consolidate(c, audio_verification="inventory")
+        assert summary["complete"] and summary["audio_verification"] == "inventory"
+        assert marker.with_name("accepted.jsonl").read_bytes() == accepted_before
+    else:
+        with pytest.raises(RuntimeError):
+            runner.consolidate(c, audio_verification="inventory")
+        assert marker.read_bytes() == old

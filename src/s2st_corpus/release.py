@@ -18,17 +18,40 @@ from .io import account_replace, file_size
 from .manifest import iter_pairs, read_jsonl, stable_shard
 
 
-def consolidate(config, allow_incomplete=False):
+def consolidate(config, allow_incomplete=False, *, audio_verification="full"):
+    if audio_verification not in {"full", "inventory"}:
+        raise ValueError(f"unknown audio verification mode: {audio_verification}")
+    if audio_verification == "inventory" and not is_external(config):
+        raise ValueError("audio inventory verification requires an external manifest profile")
     started = time.perf_counter()
     measurements = {}
     token = metrics.ACTIVE.set(measurements)
     try:
-        return _consolidate(config, allow_incomplete, started, measurements)
+        return _consolidate(config, allow_incomplete, started, measurements, audio_verification)
     finally:
         metrics.ACTIVE.reset(token)
 
 
-def _consolidate(config, allow_incomplete, started, measurements):
+def _wav_inventory(root, shard_name):
+    audio_root = (root / "audio" / "16k").absolute()
+    resolved_root = audio_root.resolve()
+    inventory = set()
+    for language in ("ja", "en"):
+        directory = audio_root / language / shard_name
+        if not directory.resolve().is_relative_to(resolved_root):
+            raise RuntimeError(f"WAV directory outside output directory: {directory}")
+        try:
+            with os.scandir(directory) as entries:
+                inventory.update(directory / entry.name for entry in entries
+                                 if entry.name.endswith(".wav") and entry.is_file(follow_symlinks=False))
+        except FileNotFoundError:
+            # A language may have no successful attempts. Record validation
+            # reports any missing WAV that a successful attempt references.
+            continue
+    return inventory
+
+
+def _consolidate(config, allow_incomplete, started, measurements, audio_verification):
     provenance = ensure_identity(config) if is_external(config) else None
     root = config.run.output_dir
     release = root / "manifests" / "releases"
@@ -53,6 +76,7 @@ def _consolidate(config, allow_incomplete, started, measurements):
                     raise ValueError("duplicate pair_id in input manifest") from error
             db.commit()
             missing = []
+            print(f"[consolidate] validating QC shards (audio_verification={audio_verification})", flush=True)
             for index in range(config.run.num_shards):
                 path = root / "manifests" / "qc" / f"shard-{index:05d}-of-{config.run.num_shards:05d}.jsonl"
                 if not path.is_file():
@@ -63,7 +87,8 @@ def _consolidate(config, allow_incomplete, started, measurements):
                     expected = [json.loads(r[0]) for r in db.execute("SELECT input_json FROM pairs WHERE shard=? ORDER BY ordinal", (index,))]
                     if len(expected) > config.run.max_pairs_per_shard:
                         raise RuntimeError("shard exceeds run.max_pairs_per_shard")
-                    validate_records(config, expected, records, provenance, complete=True)
+                    inventory = _wav_inventory(root, path.stem) if audio_verification == "inventory" else None
+                    validate_records(config, expected, records, provenance, complete=True, audio_inventory=inventory)
                     del expected
                 for row in records:
                     previous = db.execute("SELECT qc_json FROM pairs WHERE pair_id=?", (row["pair_id"],)).fetchone()
@@ -75,15 +100,18 @@ def _consolidate(config, allow_incomplete, started, measurements):
                                (json.dumps(row, ensure_ascii=False, sort_keys=True), row["pair_id"]))
                 db.commit()
                 del records
+                print(f"[consolidate] shard={index} scanned={index + 1}/{config.run.num_shards}", flush=True)
             if missing and not allow_incomplete:
                 raise RuntimeError(f"{len(missing)} shard manifests are missing; first missing={missing[:10]}")
             missing_pairs = db.execute("SELECT count(*) FROM pairs WHERE qc_json IS NULL").fetchone()[0]
             if missing_pairs and not allow_incomplete:
                 raise RuntimeError(f"{missing_pairs} input pair_id values are missing from QC manifests")
-            return _publish(db, config, release, missing, missing_pairs, provenance, started, measurements)
+            print("[consolidate] writing release manifests", flush=True)
+            return _publish(db, config, release, missing, missing_pairs, provenance, started, measurements,
+                            audio_verification)
 
 
-def _publish(db, config, release, missing, missing_pairs, provenance, started, measurements):
+def _publish(db, config, release, missing, missing_pairs, provenance, started, measurements, audio_verification):
     names = ("all", "accepted", "train", "dev", "test")
     release.mkdir(parents=True, exist_ok=True)
     splits = {s: {"total": 0, "accepted": 0, "rejected": 0, "acceptance_rate": 0.0,
@@ -133,6 +161,7 @@ def _publish(db, config, release, missing, missing_pairs, provenance, started, m
         generated = sum(s["generated_seconds"] for s in summary["attempt_metrics"].values())
         if provenance is not None:
             summary["provenance"] = provenance
+            summary["audio_verification"] = audio_verification
         summary.update(invocations=invocations, full_pipeline_wall_seconds=wall,
                        asr_phase_wall_seconds=sum(r.get("asr_phase_seconds", 0) for r in invocations),
                        tts_phase_wall_seconds=sum(r.get("tts_phase_seconds", 0) for r in invocations),

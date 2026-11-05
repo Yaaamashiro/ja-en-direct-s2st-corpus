@@ -1,13 +1,16 @@
 """Strict external-profile resume checks, including rejected attempts."""
 from pathlib import Path
 import math
+import re
 import soundfile as sf
 
 from .audio import sha256_file
 
 
-def validate_records(config, pairs, records, provenance, *, complete=False):
+def validate_records(config, pairs, records, provenance, *, complete=False, audio_inventory=None):
     expected = {p["pair_id"]: p for p in pairs}
+    audio_root = config.run.output_dir / "audio" / "16k"
+    resolved_audio_root = audio_root.resolve() if audio_inventory is None else None
     seen = set()
     for row in records:
         key = row["pair_id"]
@@ -41,7 +44,17 @@ def validate_records(config, pairs, records, provenance, *, complete=False):
                 if attempt.get("generation_status") != "ok":
                     continue
                 path = Path(attempt["wav_16k"])
-                if not path.resolve().is_relative_to((config.run.output_dir / "audio" / "16k").resolve()):
+                if audio_inventory is not None:
+                    if path.absolute() not in audio_inventory:
+                        raise RuntimeError(f"saved WAV missing from shard inventory: {path}")
+                    duration = float(attempt["duration"])
+                    if (not math.isfinite(duration) or duration <= 0
+                            or not re.fullmatch(r"[0-9a-f]{64}", attempt.get("sha256", ""))):
+                        raise RuntimeError(f"invalid saved WAV metadata: {path}")
+                    if attempt.get("qc_pass") and not config.qc.min_duration_seconds <= duration <= config.qc.max_duration_seconds:
+                        raise RuntimeError(f"passing audio has invalid duration: {path}")
+                    continue
+                if not path.resolve().is_relative_to(resolved_audio_root):
                     raise RuntimeError(f"WAV outside output directory: {path}")
                 try:
                     info = sf.info(path)
