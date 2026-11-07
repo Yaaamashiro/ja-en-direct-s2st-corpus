@@ -7,7 +7,8 @@ import pytest
 from s2st_corpus import cli
 
 
-def test_remaining_skips_completed_and_resumes_after_error(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("skip_consolidate", [False, True])
+def test_remaining_skips_completed_and_resumes_after_error(tmp_path, monkeypatch, capsys, skip_consolidate):
     config = SimpleNamespace(run=SimpleNamespace(num_shards=4, output_dir=tmp_path))
     directory = tmp_path / "manifests/qc"
     directory.mkdir(parents=True)
@@ -30,13 +31,17 @@ def test_remaining_skips_completed_and_resumes_after_error(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "load_config", lambda p: config)
     monkeypatch.setattr(cli, "run_shard", run)
     monkeypatch.setattr(cli, "consolidate", lambda c: releases.append(True) or {"complete": True})
-    monkeypatch.setattr(sys, "argv", ["cli", "run-remaining-shards"])
+    args = ["cli", "run-remaining-shards"]
+    if skip_consolidate:
+        args.append("--skip-consolidate")
+    monkeypatch.setattr(sys, "argv", args)
     with pytest.raises(RuntimeError, match="interrupted"):
         cli.main()
     assert calls == [1, 2] and not releases
     fail = False
     cli.main()
-    assert calls == [1, 2, 2, 3] and releases == [True]
+    assert calls == [1, 2, 2, 3]
+    assert releases == ([] if skip_consolidate else [True])
     capsys.readouterr()
     monkeypatch.setattr(sys, "argv", ["cli", "status"])
     cli.main()

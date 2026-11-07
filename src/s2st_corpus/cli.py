@@ -67,7 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume the first shard without a completed QC manifest.",
     )
     commands.add_parser("status", help="Report completed and remaining shards.")
-    commands.add_parser("run-remaining-shards", help="Run all unfinished shards sequentially, then consolidate.")
+    remaining = commands.add_parser("run-remaining-shards", help="Run all unfinished shards sequentially, then consolidate.")
+    remaining.add_argument("--skip-consolidate", action="store_true",
+                           help="Finish generation and QC only. Run consolidate separately to publish the release.")
     merge = commands.add_parser("consolidate", help="Build release manifests.")
     merge.add_argument("--allow-incomplete", action="store_true")
     merge.add_argument("--audio-verification", choices=["full", "inventory"], default="full",
@@ -213,13 +215,17 @@ def main() -> None:
                 completed.append(index)
                 remaining.remove(index)
                 print(f"[run-all] completed={len(completed)}/{config.run.num_shards} remaining={len(remaining)}", flush=True)
-            result["release"] = consolidate(config)
+            if not args.skip_consolidate:
+                result["release"] = consolidate(config)
         result.update(completed_shards=len(completed), remaining_shards=len(remaining),
                       next_shard=remaining[0] if remaining else None)
     else:
         result = consolidate(config, allow_incomplete=args.allow_incomplete,
                              audio_verification=args.audio_verification)
-    if is_external(config) and args.command in {"run-shard", "run-next-shard"}:
+    if is_external(config) and (
+        args.command in {"run-shard", "run-next-shard"}
+        or (args.command == "run-remaining-shards" and args.skip_consolidate)
+    ):
         verify_inputs(config)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 
