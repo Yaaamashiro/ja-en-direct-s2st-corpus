@@ -1,29 +1,28 @@
-# L4 Kokoro並列化・Whisper tuning実装レポート
+# L4 Kokoro multiprocessing and Whisper tuning report
 
 ## Git
 
 - branch: `feature/kokoro-tts`
 - base commit: `2cf2814`
-- commit: この文書を含むコミットを最終回答に記載。
-- main merge・30万pair生成は実行していません。
+- This report captures the feature-branch implementation before the full production run.
 
 ## Parallel implementation
 
-| 項目 | 実装 |
+| Area | Implementation |
 | --- | --- |
-| Kokoro multiprocessing | worker_count>=2で専用pool。1は既存逐次baseline |
-| start method | spawn固定。fork contextは明示的に拒否 |
-| worker model loading | 親が固定assetを取得・存在検証。workerはlocal-onlyでKModelを1回loadし、JA/EN KPipelineとvoiceを共有 |
-| task scheduling | Unicode文字数の長いutteranceを先にbounded dynamic queueへ投入。同じ長さはpair_id/language/attemptで固定。key重複task/resultを拒否 |
-| WAV writing | worker内で24 kHz→mono→soxr HQ→16 kHz PCM16 atomic write。waveform IPCなし |
-| parent checkpoint | 完了metadataを正しいrecordへ追加し、100 utteranceごと・phase終了・例外時に保存。workerはmanifestを書かない |
-| resume | 検証済みcheckpointのWAVは再利用。orphanは再生成。破損WAVを正常扱いしない |
-| failure | worker例外/CUDA fatal/process crashで保存してCLI failure。自動worker再起動なし |
-| phase boundary | pool終了・join後にWhisperをload。TTS/ASR overlapなし |
+| Kokoro multiprocessing | A dedicated pool handles two or more workers. One worker uses the serial baseline. |
+| Start method | Workers use `spawn`. A `fork` context is rejected. |
+| Worker model loading | The parent fetches and verifies pinned assets. Each worker loads a local KModel once and shares it across Japanese and English KPipeline instances and voices. |
+| Task scheduling | A bounded queue starts longer utterances first by Unicode character count. Ties follow pair ID, language, and attempt. Duplicate task or result keys are rejected. |
+| WAV writing | Each worker converts 24 kHz audio to mono, resamples with soxr HQ, and writes 16 kHz PCM16 WAV atomically. Waveforms stay in the worker. |
+| Parent checkpoints | The parent maps result metadata to records and checkpoints every 100 utterances, at phase end, and on exceptions. |
+| Resume | Validated checkpoint WAVs are reused. Orphaned WAVs are regenerated and corrupt files are rejected. |
+| Failure | A worker exception, fatal CUDA error, or process crash triggers a checkpoint and CLI failure. Recovery occurs on a subsequent run. |
+| Phase boundary | The pool closes and joins before Whisper loads. TTS and ASR run in separate phases. |
 
-workerはTorch CPU threads=1。親のstorage budgetはworkerのatomic置換前後のbyte差分を受け取り、WAVをDrive上で再走査せず更新します。SIGTERMはColab上で親のpool cleanupへ接続し、終了時にchildをjoin/必要ならkillします。強制killまで含む全状況で最後のcheckpointが保存される保証はなく、未記録WAVはorphanとして再生成します。
+Each worker uses one Torch CPU thread. Workers report the byte-size delta of atomic WAV replacements so the parent can update the storage budget. On Colab, SIGTERM triggers pool cleanup, which joins children and kills them if needed. A forced kill can leave the final checkpoint unwritten. The next run regenerates audio missing from the checkpoint.
 
-worker_countは音声semantic identityから除外し、既存provenanceを変更しません。新規runには `initial_performance.kokoro_worker_count`、各invocationには実際のworker_count・ASR batchを保存します。worker_count変更だけで正常な既存音声を無効化しません。voice/revision/speed/input/QC等の不一致は従来どおり拒否し、ASR batchも従来のprovenance条件に残しています。
+The audio identity excludes worker count. New runs record `initial_performance.kokoro_worker_count`, and each invocation records the worker count and ASR batch actually used. Changing only the worker count allows valid saved audio to be reused. Provenance still checks voice, revision, speed, input, QC settings, and ASR batch size.
 
 ## L4 profile
 
@@ -39,26 +38,26 @@ candidate workers: 1,2,4,6 (8 is optional, explicit only)
 candidate ASR batches: 8,16,24,32
 ```
 
-GPU名の完全一致は要求せず、別GPUならtarget/actualのwarningを表示します。T4は最低VRAM条件で拒否します。元のKokoro profileとQwen profileは削除・上書きしていません。L4用は設定・本番音声・smoke出力を別名にしています。
+A GPU other than the target generates a warning with both GPU names. A T4 fails the minimum VRAM check. The L4 profile has its own configuration and production and smoke output paths. The earlier Kokoro and Qwen profiles are also available.
 
 ## Performance benchmark
 
-新CLI：`benchmark-performance --stage tts|asr|all`。
+The benchmark command accepts `--stage tts`, `--stage asr`, or `--stage all`.
 
-- train 200 pairs、seed=42、length-bin quota=4/30/80/66/20。全候補で同じsource records/text。
-- WAVとcheckpointはlocal SSD `/content/kokoro-l4-benchmark`。Drive音声出力は拒否。
-- レポートはDriveの `kokoro-performance/l4-performance.json`、日時付きsnapshot、logs。
-- 各候補を新しいspawn subprocessで実行。ASR OOMは候補の `status=oom` として記録し、process終了後に次へ進む。
-- ASRはTTS tuningの最初の全件成功候補の音声を固定して使う。各ASR候補の前後にWAV SHA256を確認する。
-- 親がKokoro/Whisperの固定revisionを取得し、候補側はoffline/local資源を使う。
-- 同じ条件・音声で品質を比較し、transcript/metric/QCのいずれかが変わるASR候補を推奨しない。TTSはtext/voiceと大きなduration差を検査する。実L4でのworker間ASR品質比較は未実施。
-- TTS→ASR tuningの実装commit一致を確認する。不一致・不明は候補起動前に停止し、以前のレポートを上書きしない。`--stage all` もASR phase直前にcommitを再確認する。
-- throughput最大を優先。headroom不足・generation failure・品質差のある候補は除外。推奨可能な候補がなければnull。
-- configを自動変更しない。production中のautotuneなし。performance-lockはoptionalのため未実装。
+- Select 200 training pairs using seed 42 and length-bin quotas of 4/30/80/66/20. All candidates use the same records and text.
+- Store WAVs and checkpoints on the local SSD under `/content/kokoro-l4-benchmark`. Benchmark audio requires a local output path.
+- Write the report, timestamped snapshots, and logs to Drive under `kokoro-performance/`. The latest report is `l4-performance.json`.
+- Run each candidate in a fresh spawned subprocess. Record ASR out-of-memory failures as `status=oom`, then try the next candidate after that subprocess exits.
+- Use audio from the first fully successful TTS candidate for all ASR trials. Verify WAV SHA-256 hashes before and after each trial.
+- The parent fetches the pinned Kokoro and Whisper revisions. Candidates use cached assets offline.
+- Compare quality under the same conditions. For ASR, require matching transcripts, metrics, and QC. For TTS, check text, voice, and substantial duration differences. Cross-worker ASR quality on real L4 output was still pending.
+- Require the same Git commit for TTS and ASR tuning. Missing or mismatched commits stop the run before launching ASR candidates and preserve the prior report. `--stage all` rechecks the commit before ASR.
+- Recommend the eligible candidate with the highest throughput. Insufficient VRAM headroom, generation failure, or quality differences disqualify a candidate. An empty candidate set yields `null`.
+- Apply the recommended settings manually. Production uses the supplied configuration without autotuning. A separate performance lock was outside the implementation scope.
 
-測定値はaudio seconds/hours、wall、RTF、pairs/utterances per second、generation/empty/ASR failure、OOM、GPU名、per-process allocated/reserved peak等。benchmark wallにはload/startup/local WAV I/Oを含みます。
+The benchmark records generated audio duration, wall time, RTF, pairs and utterances per second, generation and ASR failures, empty audio, out-of-memory errors, GPU name, and per-process allocated and reserved memory peaks. Benchmark wall time includes loading, worker startup, and local WAV I/O.
 
-PyTorchのworker peak合計は同時刻のGPU全体peakではなく参考値です。per-worker・合計参考・最大workerを分け、benchmark時だけ約5秒間隔でnvidia-smiのGPU全体使用量もサンプルします。headroom警告には観測使用量とreserved参考値を併用し、90%超を推奨から除外します。サンプル間の短いpeakは捕捉できないため、最終1000件full benchmarkも必要です。productionではGPU pollingを追加せず、gpu_utilizationはnullです。
+The report lists each worker's PyTorch peak, the sum as a reference, and the largest worker peak. During benchmarks, `nvidia-smi` samples total GPU memory about every five seconds. Recommendations exclude candidates above 90% VRAM using both observed usage and the reserved-memory reference. Short peaks may occur between samples, so the selected setup still needs a 1,000-pair end-to-end benchmark. Production reports `gpu_utilization` as `null`.
 
 ## Notebook
 
@@ -71,18 +70,18 @@ Drive / repo / deps / L4 config / validation / GPU / preload / voice
 → plan/status → production 1 shard → remaining shards → consolidate
 ```
 
-`RUN_L4_TUNING=False`、`RUN_BENCHMARK_1000=False`、`PERFORMANCE_CONFIG_CONFIRMED=False`、`APPROVE_PRODUCTION=False`、`RUN_ALL_REMAINING=False` が初期値です。L4設定はDriveの `kokoro-jparacrawl-l4-config.yaml` に保存し、既存設定を自動上書きしません。
+The default flags are `RUN_L4_TUNING=False`, `RUN_BENCHMARK_1000=False`, `PERFORMANCE_CONFIG_CONFIRMED=False`, `APPROVE_PRODUCTION=False`, and `RUN_ALL_REMAINING=False`. The notebook saves the L4 configuration to `kokoro-jparacrawl-l4-config.yaml` on Drive and reuses it on subsequent runs.
 
 ## Tests
 
-- 既存97件を含むローカルpytest：**125 passed**（3点のレビュー修正・追加検証を含む）。既存tar展開に関するDeprecationWarning 2件のみ。GitHub CIの結果ではありません。
-- 実spawn＋FakeBackendで固定20 utterancesをworker=1/2/4で比較。全件1回、正しいpath/record、voice、16 kHz mono PCM16、duration、SHA256、atomic writeを確認。実Kokoro/GPUの品質比較ではありません。
-- worker CUDA errorの注入、実process crash(exit 17)、通常のempty generation failure、親checkpoint保存、100 utterance間隔、逆順completion、resume skip、orphan再生成、親storage budget差分を検査。
-- L4 profile / T4拒否 / 別GPU warning、throughputと90%headroomによる推奨、ASR品質差の除外を検査。
-- mock候補を使った200件抽出・全候補iteration・同じsample/audio・OOM後の次候補・report JSON・config不変を確認。
-- ASR batch=8/16/24/32で同じmock文字起こしから同じmetric/QCを得ることを確認。実Whisper/L4比較は未実施。
-- 後続レビュー対応では、longest-first順・同率時の決定性・本文不変、同じmetric/QCでtranscriptだけ違う候補の除外、同一commitでのASR継続、不一致/不明commitでの停止とレポート保持を追加検証。
-- 既存Kokoro runtime checkもCPUで実行成功。日英各1文、JA=3.875秒、EN=3.800秒、native/canonical形式を確認。`data/kokoro-l4-runtime-check/report.json`（Git対象外）。これは逐次TTS単体確認であり、L4性能値やparallel品質確認ではありません。既知のWindows phonemizer終了時cleanup警告あり、returncodeは0。
+- Local pytest reported **125 passing tests**, including the previous 97 and follow-up review coverage. It emitted two existing tar-extraction deprecation warnings.
+- Real spawned processes with FakeBackend exercised 20 fixed utterances at 1, 2, and 4 workers. Tests checked one result per task, path and record mapping, voice, 16 kHz mono PCM16, duration, SHA-256, and atomic writes.
+- Fault tests injected worker CUDA errors, a real process exit with code 17, and empty generation. Tests also covered parent checkpoints, 100-utterance intervals, reversed completion order, resume, orphan regeneration, and storage deltas.
+- Tests covered the L4 profile, T4 rejection, warnings for other GPUs, recommendations based on throughput and 90% VRAM headroom, and exclusion of candidates with ASR quality differences.
+- Mocked candidates exercised 200-pair selection, reuse of the same sample and audio, progression after OOM, JSON reporting, and preservation of configuration.
+- Batch sizes 8, 16, 24, and 32 produced identical metrics and QC from identical mocked transcripts. Real Whisper comparisons on L4 were still pending.
+- Follow-up tests covered longest-first scheduling, deterministic ties, exact source text, rejection of transcript-only differences, same-commit ASR resume, and rejection of missing or different commits while retaining the existing report.
+- A separate serial Kokoro CPU check produced 3.875 seconds of Japanese and 3.800 seconds of English from fixed sentences and verified both WAV formats. The report is at `data/kokoro-l4-runtime-check/report.json`. The known Windows phonemizer cleanup warning appeared and the process returned 0.
 
 ## Production defaults
 
@@ -94,24 +93,24 @@ num_shards: 128
 max_pairs_per_shard: 3000
 ```
 
-**L4実測前なので最適値は未決定です。** 4 workerやASR batch=24が最適と判断したものではありません。
+These defaults provided a baseline before measuring on an L4. Optimal worker and ASR batch sizes remained to be measured.
 
-## 未実施
+## Validation pending at the time
 
 - Colab L4 10 pair smoke
 - Colab L4 100 pair smoke
 - L4 worker tuning
 - L4 ASR batch tuning
-- 最終設定で1000 pair full benchmark（CER/WER・duration・RTF・VRAM・CU確認）
+- 1,000-pair end-to-end benchmark with the selected settings, checking CER, WER, duration, RTF, VRAM, and compute units
 - production 1 shard
 - 300k production
 
-上記を実測してから本番へ進みます。input index、export text、train/dev split、voice/revision、QC閾値、0.7〜30秒のduration条件、WAV integrity、streaming release、canonical orderは維持しています。
+These checks were planned before production. The implementation preserved the input index, exported text, train/dev split, pinned voice and revision, QC thresholds, 0.7–30 second duration bounds, WAV integrity checks, streaming releases, and canonical ordering.
 
 ## Length-bin shortfall handling
 
-- L4実行時のexport summaryではtrain bin 0が1件で、TTS希望quotaの4件に届かないため抽出時に停止した。GPU・モデルload以前の問題。
-- TTS tuningは不足分を決定的に再配分し、総数200件・train限定・同一候補間の同一sample・入力順・本文の保持を維持する。
-- 1000件smokeはCLI既定ではstrictのまま。`--benchmark-shortfall redistribute` の明示指定で同じ再配分を使える。Notebookでは指定と意味を表示する。
-- 希望quota・実quota・利用可能train件数・policyをselection metadataに保存する。総件数自体が不足する場合は停止し、既存のsampleを上書きしない。
-- 修正後のローカル検証：`pytest -q --basetemp=.venv/test-quota-shortfall-full-01` は130 passed（既存のtar展開DeprecationWarning 2件）。L4実機への適用・再測定は未実施。
+- An L4 run found one training pair in bin 0, below the TTS quota of four. Sampling stopped before GPU work or model loading.
+- TTS tuning now redistributes shortages deterministically to keep 200 training pairs, in input order with the original text. All candidates use the same sample.
+- The 1,000-pair smoke-test CLI uses strict quotas by default. `--benchmark-shortfall redistribute` enables redistribution. The notebook documents and sets this option.
+- Selection metadata records requested and actual quotas, available training counts, and the policy. An insufficient total causes the command to stop and preserve the existing sample.
+- After this fix, `pytest -q --basetemp=.venv/test-quota-shortfall-full-01` reported 130 passing tests and two existing tar-extraction deprecation warnings. L4 remeasurement was still pending.

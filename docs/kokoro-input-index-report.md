@@ -1,42 +1,42 @@
-# 入力manifest I/O修正レポート
+# Input manifest I/O report
 
-branch: `feature/kokoro-tts`。base commit: `8bf0ca8`。本修正のcommitは最終回答に記載します。
+This report records the implementation on `feature/kokoro-tts`, based on commit `8bf0ca8`.
 
-## 変更
+## Changes
 
-- `input_index.py`：プロセス内で共有するローカルSQLite入力索引を追加。ordinal / pair_id / shard / full JSONを保存し、元JSONLを読む際に同じraw byte列からSHA256を計算します。
-- `external.py`：export検証結果とidentityをcache。`run_input_sha256` は索引作成時のdigestを再利用し、同じmanifestをもう一度hashしません。smokeと元recordの照合も索引へqueryします。
-- `runner.py`：external profileのshard取得・完了shard再開・recheck・planを索引へ接続。legacy Qwen/JESC/KFTTのshard取得は従来APIを維持。
-- `cli.py`：起動時にcacheを初期化。statusは索引から `SELECT pair_id ... WHERE shard=?` し、completed shardごとの元manifest全走査を解消。
-- `release.py`：検証済み入力索引をローカルSQLでコピーし、QC結果を結合。元inputを再parseせず、ordinal順と全integrity検証を維持。
-- ノートブック：索引rootを `/content/s2st-input-index` に指定。本番gateは変更なし。
+- `input_index.py` adds a local SQLite index shared within each process. It stores the ordinal, pair ID, shard, and full JSON record, and hashes the original bytes as it reads the source JSONL.
+- `external.py` caches export validation and run identity. `run_input_sha256` reuses the index digest. Smoke-test records are checked against the index.
+- `runner.py` uses the index to select shards, resume completed shards, recheck, and plan for external profiles. The legacy Qwen/JESC/KFTT path uses its existing API.
+- `cli.py` initializes caches on startup. Status queries pair IDs with `SELECT pair_id ... WHERE shard=?` to avoid rescanning the source manifest for each completed shard.
+- `release.py` copies the validated input index through local SQL and joins the QC results while retaining ordinal order and all integrity checks.
+- The notebook sets the index root to `/content/s2st-input-index` and retains the explicit production approval.
 
-起動後の最初の検証で元JSONLを1回読みます。検証用のJSONチェックはローカル索引上で行い、その結果を同じCLIの全shardで共有します。各shardではmanifestとsummaryのsize / mtime / ctime / inode等を確認し、変更検出時は停止します。snapshotを途中で黙って再作成しません。
+Initial validation reads the source JSONL once. Record checks run against the local index, and all shards in the same CLI process share the result. Each shard checks the manifest and summary for changes using size, mtime, ctime, and inode. The process stops if a source changes.
 
-`consolidate` は全QC結果の検証・releaseのtmp書き込み後、公開の直前に元manifestとsummaryをSHA256で再確認します。smokeではsubsetも確認します。単独の `run-shard` / `run-next-shard` CLIも終了時に同じ最終確認をします。新しいCLIプロセスでは索引を作り直し、前プロセスのローカル索引を信用しません。
+After verifying QC results and staging the release files, `consolidate` rechecks the SHA-256 digests of the source manifest and summary before publication. Smoke runs also check the selected subset. Standalone `run-shard` and `run-next-shard` perform the same final verification. Each new CLI process builds its own index.
 
-通常の `run-remaining-shards` では元manifest全体へのアクセスは、索引化の1回と最終ハッシュ確認の1回です。128 shardで512回相当の読み込みを繰り返す経路をなくしました。RAM使用量は従来どおり1 shard程度で、索引はローカルディスクに保持します。CLI終了時には所有する一時索引を削除します。強制切断で一時ファイルが残っても、次のCLIから再利用しません。
+A typical `run-remaining-shards` reads the entire source manifest twice, once for indexing and once for final verification. This removes the repeated reads equivalent to 512 full passes in a 128-shard run. Memory holds roughly one shard and the index stays on local disk. The CLI removes the temporary index it owns at exit. If a forced disconnect leaves an index behind, subsequent processes build a fresh one.
 
-## ローカル検証
+## Local validation
 
-pytest: **97 passed**。既存tar展開に関するDeprecationWarning 2件のみ。GitHub CIの実行結果ではありません。
+Local pytest reported **97 passing tests** and two existing tar-extraction deprecation warnings.
 
-新規12ケース：
+The 12 added cases covered the following checks.
 
-- 128 shard取得＋identity確認＋planで元manifestのopenは1回。
-- completed shard=100のstatusも元manifestのopenは1回。
-- manifest / summaryの途中変更をそれぞれ拒否。
-- file属性チェックでは検出できない変更を模擬し、最終SHA256で拒否。
-- 最終確認を含めても元manifestの全読み込みは2回。
-- smoke用のshard再分割・元record照合は既存ローカル索引を使用。
-- CLI再起動相当のcache初期化で再検証・再索引化。
-- shard index / 最大件数の制約を維持。
-- CRLF・空行を含む元ファイルのraw SHA256を正しく計算。
-- 索引構築中の元ファイル変更を拒否し、失敗した一時索引を清掃。
-- 索引のみを再初期化しても既存検証digestとの不一致を拒否。
+- Fetching 128 shards, checking identity, and planning opens the source manifest once.
+- Status with 100 completed shards opens the source manifest once.
+- Changes to either the manifest or summary during a run are rejected.
+- Final SHA-256 verification catches simulated changes that file attributes miss.
+- The source manifest is read twice, including final verification.
+- Smoke-test shard reassignment and record comparison reuse the local index.
+- A cache reset equivalent to a CLI restart triggers validation and indexing again.
+- Shard index bounds and maximum pair counts are enforced.
+- Raw SHA-256 hashing accounts for CRLF line endings and blank lines.
+- A source change during indexing is rejected and the failed temporary index is cleaned up.
+- Resetting only the index still rejects a mismatch with an existing validation digest.
 
-既存のcanonical order・split release・publish marker・WAV format/SHA256/duration・provenance・resume・層化benchmark・Qwen回帰テストも通っています。入力本文、train/dev split、voice、revision、QC閾値は変更していません。
+Existing tests also passed for canonical order, split releases, the publication marker, WAV format and duration, SHA-256, provenance, resuming, stratified benchmarking, and Qwen. The implementation preserved input text, train/dev splits, voices, model revisions, and QC thresholds.
 
-## 未実施
+## Validation pending at the time
 
-実JParaCrawl export validation、Colab T4の10件→100件→1000件実測、30万件productionは未実施です。実データの品質・RTF・CUは本修正のテストから推定していません。
+This change was tested before validating the real JParaCrawl export, running the 10-, 100-, and 1,000-pair tests on Colab T4, or producing 300,000 pairs. Quality, RTF, and compute-unit usage for real data remained to be measured.

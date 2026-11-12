@@ -2,7 +2,7 @@
 
 A pipeline for building paired Japanese and English speech for direct speech-to-speech translation (S2ST). It synthesizes both sides of parallel text, checks speech quality by comparing Whisper transcriptions with the source text, and exports accepted pairs in their original input order.
 
-**[Open Kokoro in Colab](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/main/notebooks/colab_kokoro_jparacrawl.ipynb)** · [Kokoro guide (Japanese)](docs/kokoro-runbook.md) · [Data and model attribution](ATTRIBUTION.md)
+**[Open Kokoro in Colab](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/main/notebooks/colab_kokoro_jparacrawl.ipynb)** · [Kokoro guide](docs/kokoro-runbook.md) · [Data and model attribution](ATTRIBUTION.md)
 
 ## Corpus results
 
@@ -22,7 +22,7 @@ This repository contains the pipeline code and configuration files. Generated au
 | Profile | Input and speech synthesis | Resources |
 | --- | --- | --- |
 | **Kokoro + JParaCrawl** | Selected JParaCrawl v3 text · Kokoro-82M | [Colab](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/main/notebooks/colab_kokoro_jparacrawl.ipynb) · [Configuration](configs/production-kokoro-jparacrawl-l4.yaml) |
-| Qwen + JESC/KFTT | JESC and KFTT · Qwen3-TTS | [Colab](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/main/notebooks/colab_pro.ipynb) · [Docker and operations guide (Japanese)](docs/qwen-runbook.md) |
+| Qwen + JESC/KFTT | JESC and KFTT · Qwen3-TTS | [Colab](https://colab.research.google.com/github/Yaaamashiro/ja-en-direct-s2st-corpus/blob/main/notebooks/colab_pro.ipynb) · [Docker and operations guide](docs/qwen-runbook.md) |
 
 The Kokoro profile reads `manifest.jsonl` and `summary.json` exported by `jparacrawl-filtering`. In Colab, select an L4 GPU, mount Google Drive, and start with the 10-pair test to check audio quality and quality-control (QC) results. The notebook's opening table covers the 100-pair test, production runs, resuming interrupted work, and final release export. Final export can run on a CPU runtime.
 
@@ -42,7 +42,7 @@ Check for `complete: true` in `summary.json` before using a release. **Pass `acc
 
 ## Development and licensing
 
-- [Tests and runtime checks (Japanese)](docs/kokoro-runbook.md#検証)
-- [Qwen commands and operations (Japanese)](docs/production-runbook.md)
+- [Tests and runtime checks](docs/kokoro-runbook.md#verification)
+- [Qwen commands and operations](docs/production-runbook.md)
 - [MIT license for the source code](LICENSE)
 - [Attribution and terms for datasets, models, and derived outputs](ATTRIBUTION.md)

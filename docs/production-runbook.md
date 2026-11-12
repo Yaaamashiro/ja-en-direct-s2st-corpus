@@ -1,30 +1,22 @@
-# 本番コーパス生成Runbook
+# Production corpus runbook
 
-## 完全実行
+## Full run
 
 ```powershell
 docker compose run --build --rm corpus
 ```
 
-デフォルトの`build`コマンドは、JESC/KFTTの取得・選別、全128 shardの
-音声生成とWhisper品質検査、release manifestの統合までを順番に実行する。
-すべての段階は再実行可能であり、同じ設定とデータルートでは完成済みの
-manifest、音声、shardを再利用する。
+The default `build` command downloads and selects JESC/KFTT data, generates and checks audio for all 128 shards with Whisper, and writes the release manifests. Rerun it with the same configuration and data root to reuse completed manifests, audio, and shards.
 
-## 本番GPUの5文スモークテスト
+## Five-pair smoke test on the production GPU
 
-本番を開始する前に、実際のJESC/KFTTから選んだ5文対だけで、Qwen生成から
-Whisper品質検査、release manifest作成までを確認できる。
+Before production, run Qwen synthesis, Whisper quality checks, and release export on five pairs from JESC and KFTT.
 
 ```powershell
 docker compose run --build --rm corpus smoke-test
 ```
 
-選択内訳はJESCのshort/medium/long各1文と、KFTTのmedium/long各1文である。
-日英とも文末が完結しているtrain文だけを候補にする。
-該当層が不足した場合だけ、同じtrain splitの決定論的な候補で補完する。
-本番manifestと公式アーカイブは共有するが、入力・音声・manifestの出力先は
-次の専用ディレクトリへ分離される。
+The sample includes one short, one medium, and one long JESC pair and one medium and one long KFTT pair. It uses training pairs with complete sentences in both languages. If a category has too few pairs, the sampler fills the gap deterministically from the same training split. The test shares the production manifest and official archives and writes its own input, audio, and manifests under the following directory.
 
 ```text
 data/smoke/
@@ -36,131 +28,119 @@ data/smoke/
     └── manifests/releases/summary.json
 ```
 
-`summary.json`の`total_pairs`が5なら全5文の処理が完了している。
-`accepted_pairs`は日英の両方がQCを通過した文対数である。QC不合格があっても
-試行音声と理由は残るため、`all.jsonl`と音声を確認できる。同じコマンドの
-再実行では完了済みのスモークテストを再利用する。
+In `summary.json`, `total_pairs: 5` confirms that all five pairs were processed. `accepted_pairs` counts pairs that passed QC in both languages. Inspect the audio and `all.jsonl` for failed attempts and rejection reasons. Rerunning the command reuses completed smoke-test work.
 
-## 必要環境
+## Requirements
 
-- Windows + Docker Desktop + WSL2 NVIDIA backend、または
-  NVIDIA Container Toolkitが動くLinux
-- BF16対応NVIDIA GPU
-- VRAM 16 GiB以上
-- Dockerイメージ用に約16 GB
-- Hugging Faceモデルcache用に約8 GB
-- コーパスデータルートに80 GiB以上
+- Windows with Docker Desktop and the WSL2 NVIDIA backend, or Linux with NVIDIA Container Toolkit
+- NVIDIA GPU with BF16 support
+- At least 16 GiB of VRAM
+- About 16 GB for the Docker image
+- About 8 GB for the Hugging Face model cache
+- At least 80 GiB in the corpus data root
 
-外付けSSDへ置く場合：
+To store the corpus on an external SSD, set the data root before running Docker Compose.
 
 ```powershell
 $env:CORPUS_DATA_ROOT = "D:\ja-en-direct-s2st-corpus"
 docker compose run --build --rm corpus
 ```
 
-## データ準備
+## Data preparation
 
-パイプラインは次の公式アーカイブを自動取得し、設定済みSHA-256と照合する。
+The pipeline downloads the official archives and verifies their configured SHA-256 digests.
 
 | Corpus | Archive | SHA-256 |
 |---|---|---|
 | JESC | `split.tar.gz` (2019-05-12) | `9cc6f2b31225d84b204a1bc4599e5fbb158d5739ba4aa76eab30fea05ed8ccd5` |
 | KFTT | `kftt-data-1.0.tar.gz` | `fcfcaa670d6d59aa691b0e909c0d7c393852dd2fb1d6310fda9b3282dc6d1638` |
 
-展開時は絶対パス、`..`、symlink、hardlink、device fileを拒否する。
-JESCは英語・日本語TSV、KFTTは言語別ファイルとして読み込む。両コーパスの
-dev/testを先に登録するため、同じ文対がtrainにもある場合はtrain側が除かれる。
+Extraction rejects absolute paths, `..`, symbolic links, hard links, and device files. The pipeline reads JESC from English–Japanese TSVs and KFTT from separate language files. It registers dev and test records from both corpora first, so any matching pair is excluded from train.
 
-学習候補には次を適用する。
+The training selection applies the following checks and rules.
 
-- Unicode NFKC、HTML entity、空白、制御・ゼロ幅文字の正規化
-- URL、メール、markup、効果音だけの字幕、内容のない行の除外
-- 日本語文字比率・英語ラテン文字比率の検査
-- コーパス別の文長範囲と日英長さ比の検査
-- 正規化済み日英文対SHA-256による完全重複除去
-- 固定seedによる再現可能な選別
-- JESC/KFTTの推定日本語時間比70:30
-- short/medium/longの推定時間比20:50:30を目標に層化し、不足する層は
-  同一コーパスの残候補から決定論的に補完
+- Normalize text with Unicode NFKC and handle HTML entities, whitespace, control characters, and zero-width characters.
+- Exclude URLs, email addresses, markup, sound-effect-only subtitles, and empty lines.
+- Check the proportion of Japanese characters and English Latin characters.
+- Apply corpus-specific length bounds and check the Japanese-to-English length ratio.
+- Remove exact duplicates using SHA-256 hashes of normalized sentence pairs.
+- Select reproducibly with a fixed seed.
+- Target a 70:30 JESC-to-KFTT ratio by estimated Japanese audio duration.
+- Target a 20:50:30 duration ratio across short, medium, and long strata. Fill shortfalls deterministically from the remaining candidates in the same corpus.
 
-準備結果：
+Preparation writes these files.
 
 ```text
 data/input/pairs.jsonl
 data/reports/preparation/prepare-summary.json
 ```
 
-展開物と選別用SQLiteは速度のためコンテナ内の一時領域に置かれ、
-完成manifestと監査レポートだけがデータルートへ永続化される。
+Extracted data and the selection database use temporary storage inside the container. The finished manifest and audit report are saved to the data root.
 
-## 個別実行
+## Individual commands
 
-問題の切り分けが必要なときだけ個別コマンドを使う。
+Use individual commands when diagnosing a particular stage.
 
-取得・選別のみ：
+Download and select data.
 
 ```powershell
 docker compose run --build --rm corpus prepare
 ```
 
-manifestと容量計画の検査：
+Check the manifest and storage estimate.
 
 ```powershell
 docker compose run --rm corpus plan
 ```
 
-特定shardの生成：
+Generate a specific shard.
 
 ```powershell
 docker compose run --rm corpus run-shard --shard-index 0
 ```
 
-全shard完了後の統合：
+Consolidate after all shards finish.
 
 ```powershell
 docker compose run --rm corpus consolidate
 ```
 
-未完了状態の途中集計だけが必要な場合：
+Export an interim release from completed shards.
 
 ```powershell
 docker compose run --rm corpus consolidate --allow-incomplete
 ```
 
-## shard処理
+## Shard processing
 
-各shardでは次を行う。
+Each shard follows this sequence.
 
 ```text
 Qwen attempt 0
-  → Qwenを解放
+  → Release Qwen
   → Whisper QC
-  → 不合格言語だけQwen attempt 1
-  → Qwenを解放
+  → Qwen attempt 1 for languages that failed QC
+  → Release Qwen
   → Whisper QC
-  → 言語別に最良attemptを採用
+  → Select the best attempt for each language
 ```
 
-10言語音声ごとにmanifestをatomic checkpointする。CUDA OOMや
-device-side assertはCUDA contextを壊す可能性があるため、コンテナを
-失敗終了させる。設定やGPUを確認した後、同じコマンドを再実行する。
+The pipeline writes an atomic manifest checkpoint every 10 utterances. A CUDA out-of-memory error or device-side assert can leave the CUDA context unusable, so the container exits with an error. Check the configuration and GPU, then rerun the same command.
 
-## 固定条件
+## Fixed settings
 
 - Qwen：`Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`
-- speaker：`Ono_Anna`（日英共通）
+- Speaker for both languages is `Ono_Anna`.
 - TTS：CUDA BF16
 - ASR：`openai/whisper-large-v3-turbo`
-- 日本語：読み正規化CER 10%以下
-- 英語：Whisper正規化WER 10%以下
-- 長さ：0.7〜30.0秒
-- 内容不合格の再生成：言語ごとに1回
+- Japanese reading-normalized CER must be 10% or less.
+- English Whisper-normalized WER must be 10% or less.
+- Audio duration must be 0.7–30.0 seconds.
+- Each language gets one regeneration attempt after a content failure.
 
-モデルrevision、speaker、依存関係、seed規則、QC閾値を途中で変えない。
-設定を変更すると既存prepared manifestは再利用されないため、新しい
-`CORPUS_DATA_ROOT`を使用する。
+Keep the model revision, speaker, dependencies, seed rules, and QC thresholds consistent throughout a run. Use a new `CORPUS_DATA_ROOT` when changing these settings so the new run can prepare its own manifest.
 
-## 成果物
+## Outputs
 
 ```text
 data/production/
@@ -177,10 +157,6 @@ data/production/
 └── failures/
 ```
 
-S2ST/S2UT学習には `train.jsonl`、検証には `dev.jsonl`、評価には `test.jsonl` を使用する。
-各ファイルは該当splitのQC acceptedのみを含む。`accepted.jsonl` は全splitの採用音声対を保持する互換用で、training manifestには使用しない。
-`all.jsonl` は不合格を含む監査用、`summary.json` は最後に公開するcompletion markerで、split別件数・採用率・日英時間・コーパス別件数を含む。releaseの行順は元input順を保持する。
+`train.jsonl`, `dev.jsonl`, and `test.jsonl` contain the accepted pairs for each split, for training, validation, and evaluation respectively. For `alignment-transfer-s2ut`, use `accepted.jsonl`, which includes the train and dev splits in one file. `all.jsonl` includes rejected pairs for auditing. The pipeline publishes `summary.json` last as the completion marker. It reports counts and acceptance rates by split, Japanese and English audio duration, and counts by corpus. Release manifests preserve the original input order.
 
-16 kHz / mono / PCM16は300時間×2言語で約64.37 GiB、再生成10%を含む
-見積りは約70.81 GiBである。native WAVは保存しない。モデルcacheとDocker
-イメージはこの値に含まれない。
+At 16 kHz mono PCM16, 300 hours in each language takes approximately 64.37 GiB. With a 10% regeneration allowance, the estimate is 70.81 GiB. Budget separately for the model cache, Docker image, and any native WAV files. The standard run saves the 16 kHz WAVs.
